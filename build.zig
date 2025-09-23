@@ -53,9 +53,8 @@ pub fn build(b: *std.Build) void {
         "-sPROXY_TO_PTHREAD",
         "-sEXPORTED_FUNCTIONS=_malloc,_main",
         "--js-library=node_modules/xterm-pty/emscripten-pty.js",
-        "-o",
     });
-    const out_file = emcc.addOutputFileArg("zorth.mjs");
+    const out_file = emcc.addPrefixedOutputFileArg("-o", "zorth.mjs");
     emcc.addArtifactArg(lib);
 
     const install = b.addInstallDirectory(.{
@@ -64,6 +63,12 @@ pub fn build(b: *std.Build) void {
         .install_subdir = "",
     });
     install.step.dependOn(&emcc.step);
+
+    const index = b.addInstallFile(b.path("demo/index.html"), "index.html");
+    install.step.dependOn(&index.step);
+
+    const service = b.addInstallFile(b.path("node_modules/coi-serviceworker/coi-serviceworker.min.js"), "coi-serviceworker.min.js");
+    install.step.dependOn(&service.step);
 
     b.getInstallStep().dependOn(&install.step);
 }
