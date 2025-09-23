@@ -1,0 +1,6 @@
+{
+  "devDependencies": {
+    "coi-serviceworker": "^0.1.7",
+    "xterm-pty": "^0.11.1"
+  }
+}

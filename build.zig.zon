@@ -1,0 +1,19 @@
+.{
+    .name = .zorth,
+    .version = "0.0.0",
+    .fingerprint = 0x494a01801c240aeb, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.1",
+    .dependencies = .{
+        .emsdk = .{
+            .url = "https://github.com/emscripten-core/emsdk/archive/refs/tags/4.0.15.tar.gz",
+            .hash = "N-V-__8AAFOvDwCo7taCCai1-7vIWbazjhzpIv6NqgJtSZ63",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
