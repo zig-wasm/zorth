@@ -1,0 +1,3 @@
+[submodule "jonesforth"]
+	path = jonesforth
+	url = https://github.com/nornagon/jonesforth

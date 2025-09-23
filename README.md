@@ -1,5 +1,5 @@
 # zorth
-## Forth in Zig
+## Forth in Zig and WebAssembly
 
 [Forth](https://en.wikipedia.org/wiki/Forth_(programming_language)) is a 
 prehistoric [esolang](https://en.wikipedia.org/wiki/Esoteric_programming_language).

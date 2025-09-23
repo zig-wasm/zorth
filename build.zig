@@ -70,5 +70,8 @@ pub fn build(b: *std.Build) void {
     const service = b.addInstallFile(b.path("node_modules/coi-serviceworker/coi-serviceworker.min.js"), "coi-serviceworker.min.js");
     install.step.dependOn(&service.step);
 
+    const bootstrap = b.addInstallFile(b.path("jonesforth/jonesforth.f"), "jonesforth.f");
+    install.step.dependOn(&bootstrap.step);
+
     b.getInstallStep().dependOn(&install.step);
 }
