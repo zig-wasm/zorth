@@ -1,3 +1,15 @@
+//! Zorth is a [threaded](https://en.wikipedia.org/wiki/Threaded_code)
+//! [Forth](https://en.wikipedia.org/wiki/Forth_(programming_language)) in
+//! Zig.  It is based on [jonesforth](https://rwmj.wordpress.com/tag/jonesforth/)
+//! which you should definitely check out.
+//!
+//! Jonesforth leans heavily on [indirect jumps](https://en.wikipedia.org/wiki/Indirect_branch)
+//! as is natural in assembly.  The closest Zig analog would be
+//! [labeled continue](https://github.com/ziglang/zig/issues/8220). Unfortunately,
+//! that requires sticking all the code in one giant `switch` statement, à la
+//! `ceval.c` in cpython.  Fortunately, Zig provides an alternative that lets us
+//! write cleaner code: `.always_tail`.  Instead of switch prongs, built-in Forth
+//! words map to Zig functions which are only ever tail called.
 const std = @import("std");
 const fmt = std.fmt;
 const fs = std.fs;
@@ -23,6 +35,12 @@ const O_NONBLOCK = 0o4000;
 const F_LENMASK = std.ascii.control_code.us;
 const Flag = enum(u8) { IMMED = 0x80, HIDDEN = ' ', ZERO = 0x0 };
 
+/// The layout of this `struct` is very important for introspection to work.
+/// Ideally, we would use [flexible array members](https://en.wikipedia.org/wiki/Flexible_array_member)
+/// but I'm not sure how they work in Zig.  So I lie a little and `Word` only
+/// represents metadata.  "Real" words are arrays of `Instr` whose first
+/// `offset` elements are disgustingly `@ptrCast`ed to a `Word` when
+/// necessary.  Ugh.
 const Word = extern struct {
     link: ?*const Word,
     flag: u8,
@@ -119,9 +137,14 @@ fn InterpAligned(comptime alignment: mem.Alignment) type {
 
 const Interp = InterpAligned(.of(Instr));
 
+/// In jonesforth, instructions are simply machine words with context-dependent
+/// semantics.  Zig's type system lets us be more explicit.
 const Instr = packed union {
+    /// built-in
     code: *const fn (*Interp, [*]isize, [*][*]const Instr, [*]const Instr, [*]const Instr) callconv(conv) void,
+    /// LIT, LITSTRING, BRANCH, 0BRANCH, and ' are followed by one argument in the instruction stream
     literal: isize,
+    /// written in Forth
     word: [*]const Instr,
 };
 
@@ -130,6 +153,7 @@ const Source = union(enum) {
     literal: isize,
 };
 
+/// Centralize `@ptrCast` gymnastics, otherwise generic.
 fn defword_(
     comptime last: ?[]const Instr,
     comptime flag: Flag,
@@ -146,6 +170,7 @@ fn defword_(
     return instrs;
 }
 
+/// Non-immediate built-in words which access more than just the value stack.
 fn defcode_(
     comptime last: ?[]const Instr,
     comptime name: []const u8,
@@ -154,6 +179,7 @@ fn defcode_(
     return defword_(last, Flag.ZERO, name, &.{.{ .code = code }});
 }
 
+/// Many built-in words manipulate the value stack.  Minimize boilerplate.
 fn defcode(
     comptime last: ?[]const Instr,
     comptime name: []const u8,
@@ -1136,7 +1162,8 @@ test forth {
         .{ preamble ++ ": CFA@ WORD FIND >CFA @ ; CFA@ >DFA DOCOL = . ", "-1 " },
         .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
         .{ preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p },
-        // .{ preamble ++ "ENVIRON @ DUP STRLEN TELL", "SHELL=/bin/bash" },
+        .{ preamble ++ "ARGC . ", "2 " },
+        .{ preamble ++ "ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0) },
         .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 8+ EXIT ;\n" },
         .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
         .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -16 ) ;\n" },
