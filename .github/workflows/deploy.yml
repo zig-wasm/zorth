@@ -22,6 +22,7 @@ jobs:
           version: 0.15.1
       - run: zig build activate
       - run: zig build
+      - run: zig test -fllvm src/zorth.zig
       - uses: actions/upload-pages-artifact@v3
         with:
           path: zig-out

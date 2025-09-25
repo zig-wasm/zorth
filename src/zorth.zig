@@ -4,19 +4,13 @@ const fs = std.fs;
 const mem = std.mem;
 const os = std.os;
 const syscalls = os.linux.syscalls;
+const testing = std.testing;
 const arch = @import("builtin").cpu.arch;
 
 const conv: std.builtin.CallingConvention = switch (arch) {
     .x86_64 => .winapi,
     else => .auto,
 };
-var stdin_buffer: [2048]u8 = undefined;
-var stdin_reader = fs.File.stdin().reader(&stdin_buffer);
-const stdin = &stdin_reader.interface;
-
-var stdout_buffer: [2048]u8 = undefined;
-var stdout_writer = fs.File.stdout().writer(&stdout_buffer);
-const stdout = &stdout_writer.interface;
 
 const O_RDONLY = 0o0;
 const O_WRONLY = 0o1;
@@ -45,6 +39,8 @@ fn InterpAligned(comptime alignment: mem.Alignment) type {
     return struct {
         const Self = @This();
 
+        reader: *std.Io.Reader,
+        writer: *std.Io.Writer,
         state: isize,
         latest: *Word,
         s0: [*]const isize,
@@ -54,9 +50,17 @@ fn InterpAligned(comptime alignment: mem.Alignment) type {
         memory: *std.array_list.AlignedManaged(u8, alignment),
         here: [*]u8,
 
-        pub fn init(sp: []const isize, rsp: []const [*]const Instr, m: *std.array_list.AlignedManaged(u8, alignment)) Self {
+        pub fn init(
+            reader: *std.Io.Reader,
+            writer: *std.Io.Writer,
+            sp: []const isize,
+            rsp: []const [*]const Instr,
+            m: *std.array_list.AlignedManaged(u8, alignment),
+        ) Self {
             m.ensureUnusedCapacity(@sizeOf(Instr)) catch @panic("init cannot ensureUnusedCapacity");
             return .{
+                .reader = reader,
+                .writer = writer,
                 .state = 0,
                 .latest = @ptrCast(&syscall0),
                 .s0 = sp.ptr,
@@ -74,20 +78,24 @@ fn InterpAligned(comptime alignment: mem.Alignment) type {
             return @call(.always_tail, tgt[0].code, .{ self, sp, rsp, ip[1..], tgt });
         }
 
-        pub fn word(self: *Self) usize {
+        fn key(self: *Self) !u8 {
+            return self.reader.takeByte();
+        }
+
+        pub fn word(self: *Self) !usize {
             var ch: u8 = std.ascii.control_code.nul;
             var i: usize = 0;
 
             while (ch <= ' ') {
-                ch = key();
+                ch = try self.key();
                 if (ch == '\\') { // comment ⇒ skip line
-                    while (ch != '\n') ch = key();
+                    while (ch != '\n') ch = try self.key();
                 }
             }
             while (ch > ' ') {
                 self.buffer[i] = ch;
                 i += 1;
-                ch = key();
+                ch = try self.key();
             }
             return i;
         }
@@ -109,7 +117,7 @@ fn InterpAligned(comptime alignment: mem.Alignment) type {
     };
 }
 
-const Interp = InterpAligned(mem.Alignment.of(Instr));
+const Interp = InterpAligned(.of(Instr));
 
 const Instr = packed union {
     code: *const fn (*Interp, [*]isize, [*][*]const Instr, [*]const Instr, [*]const Instr) callconv(conv) void,
@@ -121,11 +129,6 @@ const Source = union(enum) {
     self: []const u8,
     literal: isize,
 };
-
-fn key() u8 {
-    const b = stdin.takeByte() catch std.process.exit(0);
-    return b;
-}
 
 fn defword_(
     comptime last: ?[]const Instr,
@@ -629,26 +632,26 @@ inline fn _dspstore(sp: [*]isize) [*]isize {
 }
 const dspstore = defcode(&dspfetch, "DSP!", _dspstore);
 
-inline fn _key(sp: [*]isize) [*]isize {
+fn _key(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const s = sp - 1;
-    s[0] = @intCast(key());
-    return s;
+    s[0] = @intCast(self.key() catch std.process.exit(0));
+    self.next(s, rsp, ip, target);
 }
-const key_ = defcode(&dspstore, "KEY", _key);
+const key_ = defcode_(&dspstore, "KEY", _key);
 
-inline fn _emit(sp: [*]isize) [*]isize {
+fn _emit(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const c: u8 = @truncate(@abs(sp[0]));
-    stdout.print("{c}", .{c}) catch {};
-    stdout.flush() catch {};
-    return sp[1..];
+    self.writer.print("{c}", .{c}) catch {};
+    self.writer.flush() catch {};
+    self.next(sp[1..], rsp, ip, target);
 }
-const emit = defcode(&key_, "EMIT", _emit);
+const emit = defcode_(&key_, "EMIT", _emit);
 
 fn _word(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const s = sp - 2;
     const u = @intFromPtr(&self.buffer);
     s[1] = @intCast(u);
-    s[0] = @intCast(self.word());
+    s[0] = @intCast(self.word() catch std.process.exit(0));
     self.next(s, rsp, ip, target);
 }
 const word_ = defcode_(&emit, "WORD", _word);
@@ -799,16 +802,16 @@ fn _litstring(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
 }
 const litstring = defcode_(&zbranch, "LITSTRING", _litstring);
 
-inline fn _tell(sp: [*]isize) [*]isize {
+fn _tell(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const p: [*]u8 = @ptrFromInt(@abs(sp[1]));
-    _ = stdout.write(p[0..@abs(sp[0])]) catch -1;
-    stdout.flush() catch {};
-    return sp[2..];
+    _ = self.writer.write(p[0..@abs(sp[0])]) catch -1;
+    self.writer.flush() catch {};
+    self.next(sp[2..], rsp, ip, target);
 }
-const tell = defcode(&litstring, "TELL", _tell);
+const tell = defcode_(&litstring, "TELL", _tell);
 
 fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const c = self.word();
+    const c = self.word() catch return;
     var s = sp;
 
     if (self.find(self.buffer[0..c])) |new| {
@@ -827,6 +830,8 @@ fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
             s[0] = a;
         }
     } else |_| {
+        if (c == 1 and self.buffer[0] == std.ascii.control_code.del)
+            return;
         std.debug.print("PARSE ERROR: {s}\n", .{self.buffer[0..c]});
         std.process.exit(0);
     }
@@ -846,7 +851,7 @@ const quit = defword_(&interpret, Flag.ZERO, "QUIT", &_quit);
 
 fn _char(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const s = sp - 1;
-    _ = self.word();
+    _ = self.word() catch std.process.exit(0);
     s[0] = self.buffer[0];
     self.next(s, rsp, ip, target);
 }
@@ -964,21 +969,30 @@ var syscall0 = defcode(&syscall1, "SYSCALL0", _syscall0);
 
 var memory: [0x800000]u8 linksection(".bss") = undefined;
 
-pub fn main() callconv(conv) void {
+fn run(reader: *std.Io.Reader, writer: *std.Io.Writer) void {
     const N = 0x20;
     var stack: [N]isize = undefined;
     const sp = stack[N..];
     var return_stack: [N][*]const Instr = undefined;
     const rsp = return_stack[N..];
     var fba: std.heap.FixedBufferAllocator = .init(&memory);
-    var m: std.array_list.AlignedManaged(u8, mem.Alignment.of(Instr)) = .init(fba.allocator());
+    var m: std.array_list.AlignedManaged(u8, .of(Instr)) = .init(fba.allocator());
     defer m.deinit();
-    var env: Interp = .init(sp, rsp, &m);
+    var env: Interp = .init(reader, writer, sp, rsp, &m);
     const target = &_quit;
     const cold_start: [1]Instr = .{.{ .word = target }};
     const ip: [*]const Instr = &cold_start;
 
     target[0].code(&env, sp, rsp, ip, target);
+}
+
+pub fn main() callconv(conv) void {
+    var stdin_buffer: [2048]u8 = undefined;
+    var stdin_reader = fs.File.stdin().reader(&stdin_buffer);
+    var stdout_buffer: [2048]u8 = undefined;
+    var stdout_writer = fs.File.stdout().writer(&stdout_buffer);
+
+    run(&stdin_reader.interface, &stdout_writer.interface);
 }
 
 fn mainWithoutEnv(c_argc: c_int, c_argv: [*][*:0]c_char) callconv(.c) c_int {
@@ -989,4 +1003,153 @@ fn mainWithoutEnv(c_argc: c_int, c_argv: [*][*:0]c_char) callconv(.c) c_int {
 
 comptime {
     @export(&mainWithoutEnv, .{ .name = "__main_argc_argv" });
+}
+
+fn forth(input: []const u8, expected: [:0]const u8) !void {
+    var fixedReader: std.Io.Reader = .fixed(input);
+
+    var actual = mem.zeroes([2048]u8);
+    var fixedWriter: std.Io.Writer = .fixed(&actual);
+    run(&fixedReader, &fixedWriter);
+    try testing.expectEqualSlices(u8, expected, mem.sliceTo(actual[0..], 0));
+}
+
+test forth {
+    // This is a stripped version of https://github.com/nornagon/jonesforth/blob/master/jonesforth.S
+    // to bootstrap just enough "high-level" Forth so this test achieves reasonable coverage.
+    const preamble =
+        \\: / /MOD SWAP DROP ;
+        \\: '\n' 10 ;
+        \\: BL 32 ;
+        \\: CR '\n' EMIT ;
+        \\: SPACE BL EMIT ;
+        \\: NEGATE 0 SWAP - ;
+        \\: TRUE 1 ;
+        \\: FALSE 0 ;
+        \\: LITERAL IMMEDIATE ' LIT , , ;
+        \\: ':' [ CHAR : ] LITERAL ;
+        \\: ';' [ CHAR ; ] LITERAL ;
+        \\: '"' [ CHAR " ] LITERAL ;
+        \\: 'A' [ CHAR A ] LITERAL ;
+        \\: '0' [ CHAR 0 ] LITERAL ;
+        \\: '-' [ CHAR - ] LITERAL ;
+        \\: [COMPILE] IMMEDIATE WORD FIND >CFA , ;
+        \\: RECURSE   IMMEDIATE LATEST @ >CFA , ;
+        \\: IF        IMMEDIATE ' 0BRANCH , HERE @ 0 , ;
+        \\: THEN      IMMEDIATE DUP HERE @ SWAP - SWAP ! ;
+        \\: ELSE      IMMEDIATE ' BRANCH , HERE @ 0 , SWAP DUP HERE @ SWAP - SWAP ! ;
+        \\: BEGIN     IMMEDIATE HERE @ ;
+        \\: AGAIN     IMMEDIATE ' BRANCH , HERE @ - , ;
+        \\: WHILE     IMMEDIATE ' 0BRANCH , HERE @ 0 , ;
+        \\: REPEAT    IMMEDIATE ' BRANCH , SWAP HERE @ - , DUP HERE @ SWAP - SWAP ! ;
+        \\: NIP SWAP DROP ;
+        \\: PICK 1+ 8 * DSP@ + @ ;
+        \\: SPACES BEGIN DUP 0> WHILE SPACE 1- REPEAT DROP ;
+        \\: U. BASE @ /MOD ?DUP IF RECURSE THEN DUP 10 < IF '0' ELSE 10 - 'A' THEN + EMIT ;
+        \\: .S DSP@ BEGIN DUP S0 @ < WHILE DUP @ U. 8+ SPACE REPEAT DROP ;
+        \\: UWIDTH BASE @ / ?DUP IF RECURSE 1+ ELSE 1 THEN ;
+        \\: U.R SWAP DUP UWIDTH ROT SWAP - SPACES U. ;
+        \\: .R SWAP DUP 0< IF NEGATE 1 SWAP ROT 1- ELSE 0 SWAP ROT THEN SWAP DUP UWIDTH ROT SWAP - SPACES SWAP IF '-' EMIT THEN U. ;
+        \\: . 0 .R SPACE ;
+        \\: U. U. SPACE ;
+        \\: WITHIN -ROT OVER <= IF > IF TRUE ELSE FALSE THEN ELSE 2DROP FALSE THEN ;
+        \\: ALIGNED 7 + -8 AND ;
+        \\: ALIGN HERE @ ALIGNED HERE ! ;
+        \\: C, HERE @ C! 1 HERE +! ;
+        \\: S" IMMEDIATE STATE @ IF
+        \\  ' LITSTRING , HERE @ 0 , BEGIN KEY DUP '"' <> WHILE C, REPEAT DROP DUP HERE @ SWAP - 8- SWAP ! ALIGN ELSE
+        \\  HERE @ BEGIN KEY DUP '"' <> WHILE OVER C! 1+ REPEAT DROP HERE @ - HERE @ SWAP THEN ;
+        \\: ." IMMEDIATE STATE @ IF [COMPILE] S" ' TELL , ELSE BEGIN KEY DUP '"' = IF DROP EXIT THEN EMIT AGAIN THEN ;
+        \\: CELLS 8 * ;
+        \\: ID. 8+ DUP C@ F_LENMASK AND BEGIN DUP 0> WHILE SWAP 1+ DUP C@ EMIT SWAP 1- REPEAT 2DROP ;
+        \\: ?IMMEDIATE 8+ C@ F_IMMED AND ;
+        \\: CASE    IMMEDIATE 0 ;
+        \\: OF      IMMEDIATE ' OVER , ' = , [COMPILE] IF ' DROP , ;
+        \\: ENDOF   IMMEDIATE [COMPILE] ELSE ;
+        \\: ENDCASE IMMEDIATE ' DROP , BEGIN ?DUP WHILE [COMPILE] THEN REPEAT ;
+        \\: CFA> LATEST @ BEGIN ?DUP WHILE 2DUP >CFA = IF NIP EXIT THEN @ REPEAT DROP 0 ;
+        \\: SEE WORD FIND HERE @ LATEST @ BEGIN 2 PICK OVER <> WHILE NIP DUP @ REPEAT DROP SWAP
+        \\  ':' EMIT SPACE DUP ID. SPACE DUP ?IMMEDIATE IF ." IMMEDIATE " THEN >DFA
+        \\  BEGIN 2DUP > WHILE DUP @
+        \\      CASE
+        \\          ' LIT OF 8+ DUP @ . ENDOF
+        \\          ' LITSTRING OF [ CHAR S ] LITERAL EMIT '"' EMIT SPACE 8+ DUP @ SWAP 8+ SWAP 2DUP TELL '"' EMIT SPACE + ALIGNED 8- ENDOF
+        \\          ' 0BRANCH OF ." 0BRANCH ( " 8+ DUP @ . ." ) " ENDOF
+        \\          '  BRANCH OF  ." BRANCH ( " 8+ DUP @ . ." ) " ENDOF
+        \\          ' ' OF [ CHAR ' ] LITERAL EMIT SPACE 8+ DUP CFA> ID. SPACE ENDOF
+        \\          ' EXIT OF 2DUP 8+ <> IF ." EXIT " THEN ENDOF
+        \\          DUP CFA> ID. SPACE
+        \\      ENDCASE
+        \\      8+
+        \\  REPEAT
+        \\ ';' EMIT CR 2DROP ;
+        \\: ['] IMMEDIATE ' LIT , ;
+        \\: EXCEPTION-MARKER RDROP 0 ;
+        \\: CATCH DSP@ 8+ >R ' EXCEPTION-MARKER 8+ >R EXECUTE ;
+        \\: THROW ?DUP IF RSP@ BEGIN DUP R0 8- < WHILE DUP @ ' EXCEPTION-MARKER 8+ = IF 8+ RSP! DUP DUP DUP R> 8- SWAP OVER ! DSP! EXIT THEN 8+ REPEAT
+        \\  DROP CASE 0 1- OF ." ABORTED" CR ENDOF ." UNCAUGHT THROW " DUP . CR ENDCASE QUIT THEN ;
+        \\: STRLEN DUP BEGIN DUP C@ 0<> WHILE 1+ REPEAT SWAP - ;
+        \\: ARGC (ARGC) @ ;
+        \\: ENVIRON ARGC 2 + CELLS (ARGC) + ;
+        \\ 
+    ;
+    const s = mem.readInt(usize, "SYSCALL0", .little);
+    const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
+    defer testing.allocator.free(p);
+    const tests = .{
+        .{ "65 EMIT ", "A" },
+        .{ "777 65 EMIT ", "A" },
+        .{ "32 DUP + 1+ EMIT ", "A" },
+        .{ "16 DUP 2DUP + + + 1+ EMIT ", "A" },
+        .{ "8 DUP * 1+ EMIT ", "A" },
+        .{ "CHAR A EMIT ", "A" },
+        .{ ": SLOW WORD FIND >CFA EXECUTE ; 65 SLOW EMIT ", "A" },
+        .{ fmt.comptimePrint("{d} DSP@ 8 TELL ", .{s}), "SYSCALL0" },
+        .{ fmt.comptimePrint("{d} DSP@ HERE @ 8 CMOVE HERE @ 8 TELL ", .{s}), "SYSCALL0" },
+        .{ fmt.comptimePrint("{d} DSP@ 2 NUMBER DROP EMIT ", .{mem.readInt(u16, "65", .little)}), "A" },
+        .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
+        .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
+        .{ "64 >R 1 RSP@ +! RSP@ 1 TELL ", "A" },
+        .{
+            \\: <BUILDS WORD CREATE DODOES , 0 , ;
+            \\: DOES> R> LATEST @ >DFA ! ;
+            \\: CONST <BUILDS , DOES> @ ;
+            \\
+            \\65 CONST FOO
+            \\FOO EMIT 
+            ,
+            "A",
+        },
+        .{ preamble ++ "VERSION . ", "47 " },
+        .{ preamble ++ "CR ", "\n" },
+        .{ preamble ++ "0 1 > . 1 0 > . ", "0 -1 " },
+        .{ preamble ++ "0 1 >= . 0 0 >= . ", "0 -1 " },
+        .{ preamble ++ "0 0<> . 1 0<> . ", "0 -1 " },
+        .{ preamble ++ "1 0<= . 0 0<= . ", "0 -1 " },
+        .{ preamble ++ "-1 0>= . 0 0>= . ", "0 -1 " },
+        .{ preamble ++ "0 0 OR . 0 -1 OR . ", "0 -1 " },
+        .{ preamble ++ "-1 -1 XOR . 0 -1 XOR . ", "0 -1 " },
+        .{ preamble ++ "-1 INVERT . 0 INVERT . ", "0 -1 " },
+        .{ preamble ++ "3 4 5 .S ", "5 4 3 " },
+        .{ preamble ++ "1 2 3 4 2SWAP .S ", "2 1 4 3 " },
+        .{ preamble ++ "F_IMMED F_HIDDEN .S ", "32 128 " },
+        .{ preamble ++ ": CFA@ WORD FIND >CFA @ ; CFA@ >DFA DOCOL = . ", "-1 " },
+        .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
+        .{ preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p },
+        // .{ preamble ++ "ENVIRON @ DUP STRLEN TELL", "SHELL=/bin/bash" },
+        .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 8+ EXIT ;\n" },
+        .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
+        .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -16 ) ;\n" },
+        .{
+            preamble ++
+                \\: FOO THROW ;
+                \\: TEST-EXCEPTIONS 25 ['] FOO CATCH ?DUP IF ." FOO threw exception: " . CR DROP THEN ;
+                \\TEST-EXCEPTIONS 
+            ,
+            "FOO threw exception: 25 \n",
+        },
+    };
+
+    inline for (tests) |t|
+        try forth(t.@"0", t.@"1");
 }
