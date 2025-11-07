@@ -74,4 +74,34 @@ pub fn build(b: *std.Build) void {
     install.step.dependOn(&bootstrap.step);
 
     b.getInstallStep().dependOn(&install.step);
+
+    const test_step = b.step("test", "Run unit tests");
+
+    const native_tests = b.addTest(.{
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zorth.zig"),
+            .target = b.resolveTargetQuery(.{}),
+        }),
+    });
+    const run_native_tests = b.addRunArtifact(native_tests);
+    test_step.dependOn(&run_native_tests.step);
+
+    const wasm_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zorth.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .wasi,
+                .cpu_features_add = std.Target.wasm.featureSet(&.{
+                    .atomics,
+                    .bulk_memory,
+                    .tail_call,
+                }),
+            }),
+        }),
+    });
+    wasm_tests.setExecCmd(&.{ "wasmtime", null });
+    const run_wasm_tests = b.addRunArtifact(wasm_tests);
+    test_step.dependOn(&run_wasm_tests.step);
 }

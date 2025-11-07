@@ -25,8 +25,7 @@ jobs:
           version: "38.0.3"
       - run: zig build activate
       - run: zig build
-      - run: zig test -fllvm src/zorth.zig
-      - run: zig test -target wasm32-wasi -mcpu baseline+atomics+bulk_memory+tail_call --test-cmd wasmtime --test-cmd-bin src/zorth.zig
+      - run: zig build test --summary all
       - uses: actions/upload-pages-artifact@v3
         with:
           path: zig-out

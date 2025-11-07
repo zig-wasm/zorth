@@ -1178,8 +1178,8 @@ test forth {
         const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
         defer testing.allocator.free(p);
 
-        try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "2 ");
-        try forth(preamble ++ ": ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0));
+        try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "4 ");
+        try forth(preamble ++ ": ARGC (ARGC) @ ; : ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0));
         try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
     }
 }
