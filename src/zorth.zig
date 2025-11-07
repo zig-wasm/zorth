@@ -1115,8 +1115,6 @@ test forth {
         \\: THROW ?DUP IF RSP@ BEGIN DUP R0 {d}- < WHILE DUP @ ' EXCEPTION-MARKER {d}+ = IF {d}+ RSP! DUP DUP DUP R> {d}- SWAP OVER ! DSP! EXIT THEN {d}+ REPEAT
         \\  DROP CASE 0 1- OF ." ABORTED" CR ENDOF ." UNCAUGHT THROW " DUP . CR ENDCASE QUIT THEN ;
         \\: STRLEN DUP BEGIN DUP C@ 0<> WHILE 1+ REPEAT SWAP - ;
-        \\: ARGC (ARGC) @ ;
-        \\: ENVIRON ARGC 2 + CELLS (ARGC) + ;
         \\ 
     , .{@sizeOf(usize)} ** 24);
 
@@ -1129,8 +1127,8 @@ test forth {
         .{ "8 DUP * 1+ EMIT ", "A" },
         .{ "CHAR A EMIT ", "A" },
         .{ ": SLOW WORD FIND >CFA EXECUTE ; 65 SLOW EMIT ", "A" },
-        .{ fmt.comptimePrint("{d} DSP@ 8 TELL ", .{s}), "F" ** @sizeOf(usize) },
-        .{ fmt.comptimePrint("{d} DSP@ HERE @ 8 CMOVE HERE @ 8 TELL ", .{s}), "F" ** @sizeOf(usize) },
+        .{ fmt.comptimePrint("{d} DSP@ {d} TELL ", .{ s, @sizeOf(usize) }), "F" ** @sizeOf(usize) },
+        .{ fmt.comptimePrint("{d} DSP@ HERE @ {d} CMOVE HERE @ {d} TELL ", .{ s, @sizeOf(usize), @sizeOf(usize) }), "F" ** @sizeOf(usize) },
         .{ fmt.comptimePrint("{d} DSP@ 2 NUMBER DROP EMIT ", .{mem.readInt(u16, "65", .little)}), "A" },
         .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
         .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
@@ -1160,11 +1158,9 @@ test forth {
         .{ preamble ++ "F_IMMED F_HIDDEN .S ", "32 128 " },
         .{ preamble ++ ": CFA@ WORD FIND >CFA @ ; CFA@ >DFA DOCOL = . ", "-1 " },
         .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
-        .{ preamble ++ "ARGC . ", "2 " },
-        .{ preamble ++ "ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0) },
-        .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 8+ EXIT ;\n" },
+        .{ preamble ++ "SEE >DFA ", fmt.comptimePrint(": >DFA >CFA {d}+ EXIT ;\n", .{@sizeOf(usize)}) },
         .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
-        .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -16 ) ;\n" },
+        .{ preamble ++ "SEE QUIT ", fmt.comptimePrint(": QUIT R0 RSP! INTERPRET BRANCH ( -{d} ) ;\n", .{2 * @sizeOf(usize)}) },
         .{
             preamble ++
                 \\: FOO THROW ;
@@ -1182,6 +1178,8 @@ test forth {
         const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
         defer testing.allocator.free(p);
 
+        try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "2 ");
+        try forth(preamble ++ ": ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0));
         try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
     }
 }

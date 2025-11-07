@@ -19,10 +19,14 @@ jobs:
       - run: npm ci 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.1
+          version: "0.15.2"
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "38.0.3"
       - run: zig build activate
       - run: zig build
       - run: zig test -fllvm src/zorth.zig
+      - run: zig test -target wasm32-wasi -mcpu baseline+atomics+bulk_memory+tail_call --test-cmd wasmtime --test-cmd-bin src/zorth.zig
       - uses: actions/upload-pages-artifact@v3
         with:
           path: zig-out
