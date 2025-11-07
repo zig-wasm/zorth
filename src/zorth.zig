@@ -1043,7 +1043,7 @@ fn forth(input: []const u8, expected: [:0]const u8) !void {
 test forth {
     // This is a stripped version of https://github.com/nornagon/jonesforth/blob/master/jonesforth.S
     // to bootstrap just enough "high-level" Forth so this test achieves reasonable coverage.
-    const preamble =
+    const preamble = fmt.comptimePrint(
         \\: / /MOD SWAP DROP ;
         \\: '\n' 10 ;
         \\: BL 32 ;
@@ -1069,26 +1069,26 @@ test forth {
         \\: WHILE     IMMEDIATE ' 0BRANCH , HERE @ 0 , ;
         \\: REPEAT    IMMEDIATE ' BRANCH , SWAP HERE @ - , DUP HERE @ SWAP - SWAP ! ;
         \\: NIP SWAP DROP ;
-        \\: PICK 1+ 8 * DSP@ + @ ;
+        \\: PICK 1+ {d} * DSP@ + @ ;
         \\: SPACES BEGIN DUP 0> WHILE SPACE 1- REPEAT DROP ;
         \\: U. BASE @ /MOD ?DUP IF RECURSE THEN DUP 10 < IF '0' ELSE 10 - 'A' THEN + EMIT ;
-        \\: .S DSP@ BEGIN DUP S0 @ < WHILE DUP @ U. 8+ SPACE REPEAT DROP ;
+        \\: .S DSP@ BEGIN DUP S0 @ < WHILE DUP @ U. {d}+ SPACE REPEAT DROP ;
         \\: UWIDTH BASE @ / ?DUP IF RECURSE 1+ ELSE 1 THEN ;
         \\: U.R SWAP DUP UWIDTH ROT SWAP - SPACES U. ;
         \\: .R SWAP DUP 0< IF NEGATE 1 SWAP ROT 1- ELSE 0 SWAP ROT THEN SWAP DUP UWIDTH ROT SWAP - SPACES SWAP IF '-' EMIT THEN U. ;
         \\: . 0 .R SPACE ;
         \\: U. U. SPACE ;
         \\: WITHIN -ROT OVER <= IF > IF TRUE ELSE FALSE THEN ELSE 2DROP FALSE THEN ;
-        \\: ALIGNED 7 + -8 AND ;
+        \\: ALIGNED {d} 1- + -{d} AND ;
         \\: ALIGN HERE @ ALIGNED HERE ! ;
         \\: C, HERE @ C! 1 HERE +! ;
         \\: S" IMMEDIATE STATE @ IF
-        \\  ' LITSTRING , HERE @ 0 , BEGIN KEY DUP '"' <> WHILE C, REPEAT DROP DUP HERE @ SWAP - 8- SWAP ! ALIGN ELSE
+        \\  ' LITSTRING , HERE @ 0 , BEGIN KEY DUP '"' <> WHILE C, REPEAT DROP DUP HERE @ SWAP - {d}- SWAP ! ALIGN ELSE
         \\  HERE @ BEGIN KEY DUP '"' <> WHILE OVER C! 1+ REPEAT DROP HERE @ - HERE @ SWAP THEN ;
         \\: ." IMMEDIATE STATE @ IF [COMPILE] S" ' TELL , ELSE BEGIN KEY DUP '"' = IF DROP EXIT THEN EMIT AGAIN THEN ;
-        \\: CELLS 8 * ;
-        \\: ID. 8+ DUP C@ F_LENMASK AND BEGIN DUP 0> WHILE SWAP 1+ DUP C@ EMIT SWAP 1- REPEAT 2DROP ;
-        \\: ?IMMEDIATE 8+ C@ F_IMMED AND ;
+        \\: CELLS {d} * ;
+        \\: ID. {d}+ DUP C@ F_LENMASK AND BEGIN DUP 0> WHILE SWAP 1+ DUP C@ EMIT SWAP 1- REPEAT 2DROP ;
+        \\: ?IMMEDIATE {d}+ C@ F_IMMED AND ;
         \\: CASE    IMMEDIATE 0 ;
         \\: OF      IMMEDIATE ' OVER , ' = , [COMPILE] IF ' DROP , ;
         \\: ENDOF   IMMEDIATE [COMPILE] ELSE ;
@@ -1098,30 +1098,29 @@ test forth {
         \\  ':' EMIT SPACE DUP ID. SPACE DUP ?IMMEDIATE IF ." IMMEDIATE " THEN >DFA
         \\  BEGIN 2DUP > WHILE DUP @
         \\      CASE
-        \\          ' LIT OF 8+ DUP @ . ENDOF
-        \\          ' LITSTRING OF [ CHAR S ] LITERAL EMIT '"' EMIT SPACE 8+ DUP @ SWAP 8+ SWAP 2DUP TELL '"' EMIT SPACE + ALIGNED 8- ENDOF
-        \\          ' 0BRANCH OF ." 0BRANCH ( " 8+ DUP @ . ." ) " ENDOF
-        \\          '  BRANCH OF  ." BRANCH ( " 8+ DUP @ . ." ) " ENDOF
-        \\          ' ' OF [ CHAR ' ] LITERAL EMIT SPACE 8+ DUP CFA> ID. SPACE ENDOF
-        \\          ' EXIT OF 2DUP 8+ <> IF ." EXIT " THEN ENDOF
+        \\          ' LIT OF {d}+ DUP @ . ENDOF
+        \\          ' LITSTRING OF [ CHAR S ] LITERAL EMIT '"' EMIT SPACE {d}+ DUP @ SWAP {d}+ SWAP 2DUP TELL '"' EMIT SPACE + ALIGNED {d}- ENDOF
+        \\          ' 0BRANCH OF ." 0BRANCH ( " {d}+ DUP @ . ." ) " ENDOF
+        \\          '  BRANCH OF  ." BRANCH ( " {d}+ DUP @ . ." ) " ENDOF
+        \\          ' ' OF [ CHAR ' ] LITERAL EMIT SPACE {d}+ DUP CFA> ID. SPACE ENDOF
+        \\          ' EXIT OF 2DUP {d}+ <> IF ." EXIT " THEN ENDOF
         \\          DUP CFA> ID. SPACE
         \\      ENDCASE
-        \\      8+
+        \\      {d}+
         \\  REPEAT
         \\ ';' EMIT CR 2DROP ;
         \\: ['] IMMEDIATE ' LIT , ;
         \\: EXCEPTION-MARKER RDROP 0 ;
-        \\: CATCH DSP@ 8+ >R ' EXCEPTION-MARKER 8+ >R EXECUTE ;
-        \\: THROW ?DUP IF RSP@ BEGIN DUP R0 8- < WHILE DUP @ ' EXCEPTION-MARKER 8+ = IF 8+ RSP! DUP DUP DUP R> 8- SWAP OVER ! DSP! EXIT THEN 8+ REPEAT
+        \\: CATCH DSP@ {d}+ >R ' EXCEPTION-MARKER {d}+ >R EXECUTE ;
+        \\: THROW ?DUP IF RSP@ BEGIN DUP R0 {d}- < WHILE DUP @ ' EXCEPTION-MARKER {d}+ = IF {d}+ RSP! DUP DUP DUP R> {d}- SWAP OVER ! DSP! EXIT THEN {d}+ REPEAT
         \\  DROP CASE 0 1- OF ." ABORTED" CR ENDOF ." UNCAUGHT THROW " DUP . CR ENDCASE QUIT THEN ;
         \\: STRLEN DUP BEGIN DUP C@ 0<> WHILE 1+ REPEAT SWAP - ;
         \\: ARGC (ARGC) @ ;
         \\: ENVIRON ARGC 2 + CELLS (ARGC) + ;
         \\ 
-    ;
-    const s = mem.readInt(usize, "SYSCALL0", .little);
-    const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
-    defer testing.allocator.free(p);
+    , .{@sizeOf(usize)} ** 24);
+
+    const s = mem.readInt(usize, "F" ** @sizeOf(usize), .little);
     const tests = .{
         .{ "65 EMIT ", "A" },
         .{ "777 65 EMIT ", "A" },
@@ -1130,8 +1129,8 @@ test forth {
         .{ "8 DUP * 1+ EMIT ", "A" },
         .{ "CHAR A EMIT ", "A" },
         .{ ": SLOW WORD FIND >CFA EXECUTE ; 65 SLOW EMIT ", "A" },
-        .{ fmt.comptimePrint("{d} DSP@ 8 TELL ", .{s}), "SYSCALL0" },
-        .{ fmt.comptimePrint("{d} DSP@ HERE @ 8 CMOVE HERE @ 8 TELL ", .{s}), "SYSCALL0" },
+        .{ fmt.comptimePrint("{d} DSP@ 8 TELL ", .{s}), "F" ** @sizeOf(usize) },
+        .{ fmt.comptimePrint("{d} DSP@ HERE @ 8 CMOVE HERE @ 8 TELL ", .{s}), "F" ** @sizeOf(usize) },
         .{ fmt.comptimePrint("{d} DSP@ 2 NUMBER DROP EMIT ", .{mem.readInt(u16, "65", .little)}), "A" },
         .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
         .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
@@ -1161,7 +1160,6 @@ test forth {
         .{ preamble ++ "F_IMMED F_HIDDEN .S ", "32 128 " },
         .{ preamble ++ ": CFA@ WORD FIND >CFA @ ; CFA@ >DFA DOCOL = . ", "-1 " },
         .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
-        .{ preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p },
         .{ preamble ++ "ARGC . ", "2 " },
         .{ preamble ++ "ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0) },
         .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 8+ EXIT ;\n" },
@@ -1179,4 +1177,11 @@ test forth {
 
     inline for (tests) |t|
         try forth(t.@"0", t.@"1");
+
+    if (!arch.isWasm()) {
+        const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
+        defer testing.allocator.free(p);
+
+        try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
+    }
 }
