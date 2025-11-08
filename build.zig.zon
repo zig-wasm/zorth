@@ -8,6 +8,10 @@
             .url = "https://github.com/emscripten-core/emsdk/archive/refs/tags/4.0.15.tar.gz",
             .hash = "N-V-__8AAFOvDwCo7taCCai1-7vIWbazjhzpIv6NqgJtSZ63",
         },
+        .zemscripten = .{
+            .url = "git+https://github.com/zig-gamedev/zemscripten#00da03b188220374a57cb34cda6230b8d53737ea",
+            .hash = "zemscripten-0.2.0-dev-sRlDqFJSAAB8hgnRt5DDMKP3zLlDtMnUDwYRJVCa5lGY",
+        },
     },
     .paths = .{
         "build.zig",
