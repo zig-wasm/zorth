@@ -35,7 +35,6 @@ pub fn build(b: *std.Build) !void {
     });
     try emcc_flags.put("-mtail-call", {});
     try emcc_flags.put("-pthread", {});
-    try emcc_flags.put("--js-library=node_modules/xterm-pty/emscripten-pty.js", {});
 
     var emcc_settings: zemscripten.EmccSettings = .init(b.allocator);
     try emcc_settings.put("PROXY_TO_PTHREAD", "1");
@@ -48,6 +47,12 @@ pub fn build(b: *std.Build) !void {
         .out_file_name = "zorth.mjs",
         .install_dir = .prefix,
     });
+
+    var emcc: *std.Build.Step.Run = @fieldParentPtr("step", emcc_step.dependencies.getLast());
+    const js_library_path = b.path("node_modules/xterm-pty/emscripten-pty.js");
+    emcc.addArg("--js-library");
+    emcc.addFileArg(js_library_path);
+    emcc.addFileInput(js_library_path);
 
     inline for (.{
         "demo/index.html",
