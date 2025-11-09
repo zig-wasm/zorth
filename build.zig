@@ -1,23 +1,10 @@
 const std = @import("std");
+const zemscripten = @import("zemscripten");
 
-fn emsdk(b: *std.Build, sub_path: []const u8) []const u8 {
-    return b.dependency("emsdk", .{}).path(sub_path).getPath(b);
-}
-
-fn activateEmsdk(b: *std.Build) void {
-    const version = b.option([]const u8, "version", "emsdk version to activate") orelse "4.0.15";
-
-    const install = b.addSystemCommand(&.{ emsdk(b, "emsdk"), "install", version });
-    const activate = b.addSystemCommand(&.{ emsdk(b, "emsdk"), "activate", version });
-
-    activate.step.dependOn(&install.step);
-
-    const step = b.step("activate", "Activate emsdk");
-    step.dependOn(&activate.step);
-}
-
-pub fn build(b: *std.Build) void {
-    activateEmsdk(b);
+pub fn build(b: *std.Build) !void {
+    const activateEmsdk = zemscripten.activateEmsdkStep(b);
+    const activate = b.step("activate", "Activate emsdk");
+    activate.dependOn(activateEmsdk);
 
     const target = b.standardTargetOptions(.{
         .default_target = .{
@@ -42,38 +29,43 @@ pub fn build(b: *std.Build) void {
     lib.rdynamic = true;
     lib.linkLibC();
 
-    const emcc = b.addSystemCommand(&.{
-        std.fs.path.join(b.allocator, &.{
-            emsdk(b, "upstream"),
-            "emscripten",
-            "emcc",
-        }) catch unreachable,
-        "-mtail-call",
-        "-pthread",
-        "-sPROXY_TO_PTHREAD",
-        "-sEXPORTED_FUNCTIONS=_malloc,_main",
-        "--js-library=node_modules/xterm-pty/emscripten-pty.js",
+    var emcc_flags = zemscripten.emccDefaultFlags(b.allocator, .{
+        .optimize = optimize,
+        .fsanitize = false,
     });
-    const out_file = emcc.addPrefixedOutputFileArg("-o", "zorth.mjs");
-    emcc.addArtifactArg(lib);
+    try emcc_flags.put("-mtail-call", {});
+    try emcc_flags.put("-pthread", {});
 
-    const install = b.addInstallDirectory(.{
-        .source_dir = out_file.dirname(),
+    var emcc_settings: zemscripten.EmccSettings = .init(b.allocator);
+    try emcc_settings.put("PROXY_TO_PTHREAD", "1");
+    try emcc_settings.put("EXPORTED_FUNCTIONS", "_malloc,_main");
+
+    const emcc_step = zemscripten.emccStep(b, lib, .{
+        .optimize = optimize,
+        .flags = emcc_flags,
+        .settings = emcc_settings,
+        .out_file_name = "zorth.mjs",
         .install_dir = .prefix,
-        .install_subdir = "",
     });
-    install.step.dependOn(&emcc.step);
 
-    const index = b.addInstallFile(b.path("demo/index.html"), "index.html");
-    install.step.dependOn(&index.step);
+    var emcc: *std.Build.Step.Run = @fieldParentPtr("step", emcc_step.dependencies.getLast());
+    const js_library_path = b.path("node_modules/xterm-pty/emscripten-pty.js");
+    emcc.addArg("--js-library");
+    emcc.addFileArg(js_library_path);
+    emcc.addFileInput(js_library_path);
 
-    const service = b.addInstallFile(b.path("node_modules/coi-serviceworker/coi-serviceworker.min.js"), "coi-serviceworker.min.js");
-    install.step.dependOn(&service.step);
-
-    const bootstrap = b.addInstallFile(b.path("jonesforth/jonesforth.f"), "jonesforth.f");
-    install.step.dependOn(&bootstrap.step);
-
-    b.getInstallStep().dependOn(&install.step);
+    inline for (.{
+        "demo/index.html",
+        "node_modules/coi-serviceworker/coi-serviceworker.min.js",
+        "jonesforth/jonesforth.f",
+    }) |sub_path| {
+        const file = b.addInstallFile(
+            b.path(sub_path),
+            std.fs.path.basename(sub_path),
+        );
+        emcc_step.dependOn(&file.step);
+    }
+    b.getInstallStep().dependOn(emcc_step);
 
     const test_step = b.step("test", "Run unit tests");
 
