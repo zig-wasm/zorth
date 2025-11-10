@@ -36,7 +36,10 @@ pub fn build(b: *std.Build) !void {
     try emcc_flags.put("-mtail-call", {});
     try emcc_flags.put("-pthread", {});
 
-    var emcc_settings: zemscripten.EmccSettings = .init(b.allocator);
+    var emcc_settings = zemscripten.emccDefaultSettings(b.allocator, .{
+        .optimize = optimize,
+        .emsdk_allocator = .dlmalloc,
+    });
     try emcc_settings.put("PROXY_TO_PTHREAD", "1");
     try emcc_settings.put("EXPORTED_FUNCTIONS", "_malloc,_main");
 
