@@ -1161,6 +1161,7 @@ test forth {
         .{ preamble ++ "SEE >DFA ", fmt.comptimePrint(": >DFA >CFA {d}+ EXIT ;\n", .{@sizeOf(usize)}) },
         .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
         .{ preamble ++ "SEE QUIT ", fmt.comptimePrint(": QUIT R0 RSP! INTERPRET BRANCH ( -{d} ) ;\n", .{2 * @sizeOf(usize)}) },
+        .{ preamble ++ "SEE / ", ": / /MOD SWAP DROP ;\n" },
         .{
             preamble ++
                 \\: FOO THROW ;
