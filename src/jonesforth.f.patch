@@ -1,6 +1,0 @@
-995,996c995,996
-< 		2DUP SWAP	( cfa curr curr cfa )
-< 		< IF		( current dictionary entry < cfa? )
----
-> 		2DUP >CFA	( cfa curr curr cfa )
-> 		= IF		( current dictionary entry < cfa? )

@@ -849,7 +849,7 @@ fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
         }
     } else if (fmt.parseInt(isize, self.buffer[0..c], @truncate(@abs(self.base)))) |a| {
         if (self.state == 1) {
-            self.append(.{ .word = codeFieldAddress(&lit) });
+            self.append(.{ .word = &.{.{ .code = _lit }} });
             self.append(.{ .literal = a });
         } else {
             s = sp - 1;
@@ -1093,7 +1093,7 @@ test forth {
         \\: OF      IMMEDIATE ' OVER , ' = , [COMPILE] IF ' DROP , ;
         \\: ENDOF   IMMEDIATE [COMPILE] ELSE ;
         \\: ENDCASE IMMEDIATE ' DROP , BEGIN ?DUP WHILE [COMPILE] THEN REPEAT ;
-        \\: CFA> LATEST @ BEGIN ?DUP WHILE 2DUP >CFA = IF NIP EXIT THEN @ REPEAT DROP 0 ;
+        \\: CFA> LATEST @ BEGIN ?DUP WHILE 2DUP SWAP < IF NIP EXIT THEN @ REPEAT DROP 0 ;
         \\: SEE WORD FIND HERE @ LATEST @ BEGIN 2 PICK OVER <> WHILE NIP DUP @ REPEAT DROP SWAP
         \\  ':' EMIT SPACE DUP ID. SPACE DUP ?IMMEDIATE IF ." IMMEDIATE " THEN >DFA
         \\  BEGIN 2DUP > WHILE DUP @

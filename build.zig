@@ -67,14 +67,6 @@ pub fn build(b: *std.Build) !void {
             std.fs.path.basename(sub_path),
         );
         emcc_step.dependOn(&file.step);
-        if (comptime std.mem.eql(u8, sub_path, "jonesforth/jonesforth.f")) {
-            const patch = b.addSystemCommand(&.{
-                "patch",
-                b.getInstallPath(file.dir, file.dest_rel_path),
-            });
-            patch.addFileArg(b.path("src/jonesforth.f.patch"));
-            emcc_step.dependOn(&patch.step);
-        }
     }
     b.getInstallStep().dependOn(emcc_step);
 
