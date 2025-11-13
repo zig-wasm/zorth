@@ -120,9 +120,9 @@ fn InterpAligned(comptime alignment: mem.Alignment) type {
 
         pub fn find(self: Self, name: []u8) ?*const Word {
             const mask = @intFromEnum(Flag.HIDDEN) | F_LENMASK;
-            var node: ?*const Word = self.latest;
-            while (node != null and ((node.?.flag & mask) != name.len or !mem.eql(u8, node.?.name[0..name.len], name)))
-                node = node.?.link;
+            var node: *const Word = self.latest;
+            while (node.flag & mask != name.len or !mem.eql(u8, node.name[0..name.len], name))
+                node = node.link orelse return null;
 
             return node;
         }
@@ -1182,5 +1182,14 @@ test forth {
         try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "4 ");
         try forth(preamble ++ ": ARGC (ARGC) @ ; : ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0));
         try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
+    }
+}
+
+test "word addresses increase" {
+    var node: *const Word = @ptrCast(&syscall0);
+    while (node.link) |link| : (node = link) {
+        const a: [*]const Instr = @ptrCast(link);
+        const b: [*]const Instr = @ptrCast(node);
+        try testing.expect(b - a > offset);
     }
 }
