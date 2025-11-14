@@ -9,8 +9,8 @@
             .hash = "N-V-__8AAFOvDwCo7taCCai1-7vIWbazjhzpIv6NqgJtSZ63",
         },
         .zemscripten = .{
-            .url = "git+https://github.com/zig-gamedev/zemscripten#00da03b188220374a57cb34cda6230b8d53737ea",
-            .hash = "zemscripten-0.2.0-dev-sRlDqFJSAAB8hgnRt5DDMKP3zLlDtMnUDwYRJVCa5lGY",
+            .url = "git+https://github.com/zig-gamedev/zemscripten#f724af6f533ee30e1d39e5cd085e1cd50f0573e8",
+            .hash = "zemscripten-0.2.0-dev-sRlDqCxSAADjjPPdFi6yIUxcZn8_q8PP4OtdtIWgQgRK",
         },
     },
     .paths = .{

@@ -49,13 +49,8 @@ pub fn build(b: *std.Build) !void {
         .settings = emcc_settings,
         .out_file_name = "zorth.mjs",
         .install_dir = .prefix,
+        .js_library_path = b.path("node_modules/xterm-pty/emscripten-pty.js"),
     });
-
-    var emcc: *std.Build.Step.Run = @fieldParentPtr("step", emcc_step.dependencies.getLast());
-    const js_library_path = b.path("node_modules/xterm-pty/emscripten-pty.js");
-    emcc.addArg("--js-library");
-    emcc.addFileArg(js_library_path);
-    emcc.addFileInput(js_library_path);
 
     inline for (.{
         "demo/index.html",
