@@ -52,8 +52,8 @@ const Word = extern struct {
 
 const offset = @divExact(@sizeOf(Word), @sizeOf(Instr));
 
-inline fn codeFieldAddress(w: [*]const Instr) [*]const Instr {
-    return w + offset;
+inline fn codeFieldAddress(w: [*]const Instr) usize {
+    return @intFromPtr(w + offset);
 }
 
 inline fn openFlags(flags: usize) std.c.O {
@@ -117,7 +117,7 @@ const Interp = struct {
 
     pub inline fn next(self: *Self, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) void {
         _ = target;
-        const tgt = ip[0].word;
+        const tgt: [*]const Instr = @ptrFromInt(ip[0].word);
         return @call(.always_tail, primitives[tgt[0].code], .{ self, sp, rsp, ip[1..], tgt });
     }
 
@@ -167,7 +167,7 @@ const Instr = packed union(usize) {
     /// LIT, LITSTRING, BRANCH, 0BRANCH, and ' are followed by one argument in the instruction stream
     literal: isize,
     /// written in Forth
-    word: [*]const Instr,
+    word: usize,
 };
 
 const Source = union(enum) {
@@ -956,13 +956,13 @@ fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
     if (self.find(self.buffer[0..c])) |new| {
         const tgt = codeFieldAddress(@ptrCast(new));
         if ((new.flag & @intFromEnum(Flag.IMMED)) != 0 or self.state == 0) {
-            return @call(.always_tail, tgt[0].code, .{ self, sp, rsp, ip, tgt });
+            return @call(.always_tail, primitives[tgt[0].code], .{ self, sp, rsp, ip, tgt });
         } else {
             self.append(.{ .word = tgt });
         }
     } else if (fmt.parseInt(isize, self.buffer[0..c], @truncate(@abs(self.base)))) |a| {
         if (self.state == 1) {
-            self.append(.{ .word = &.{.{ .code = 36 }} });
+            self.append(.{ .word = codeFieldAddress(&lit) });
             self.append(.{ .literal = a });
         } else {
             s = sp - 1;
@@ -1107,10 +1107,10 @@ fn run(reader: *std.Io.Reader, writer: *std.Io.Writer) void {
     defer m.deinit();
     var env: Interp = .init(reader, writer, sp, rsp, &m);
     const target = &_quit;
-    const cold_start: [1]Instr = .{.{ .word = target }};
+    const cold_start: [1]Instr = .{.{ .word = codeFieldAddress(target) }};
     const ip: [*]const Instr = &cold_start;
 
-    target[0].code(&env, sp, rsp, ip, target);
+    primitives[target[0].code](&env, sp, rsp, ip, target);
 }
 
 pub fn main() callconv(conv) void {
