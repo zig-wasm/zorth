@@ -78,89 +78,85 @@ inline fn openFlags(flags: usize) std.c.O {
     };
 }
 
-fn InterpAligned(comptime alignment: mem.Alignment) type {
-    return struct {
-        const Self = @This();
+const Interp = struct {
+    const Self = @This();
 
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    state: isize,
+    latest: *Word,
+    s0: [*]const isize,
+    base: isize,
+    r0: [*]const [*]const Instr,
+    buffer: [32]u8,
+    memory: *std.array_list.AlignedManaged(u8, .of(usize)),
+    here: [*]u8,
+
+    pub fn init(
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
-        state: isize,
-        latest: *Word,
-        s0: [*]const isize,
-        base: isize,
-        r0: [*]const [*]const Instr,
-        buffer: [32]u8,
-        memory: *std.array_list.AlignedManaged(u8, alignment),
-        here: [*]u8,
+        sp: []const isize,
+        rsp: []const [*]const Instr,
+        m: *std.array_list.AlignedManaged(u8, .of(usize)),
+    ) Self {
+        m.ensureUnusedCapacity(@sizeOf(Instr)) catch @panic("init cannot ensureUnusedCapacity");
+        return .{
+            .reader = reader,
+            .writer = writer,
+            .state = 0,
+            .latest = @ptrCast(&syscall0),
+            .s0 = sp.ptr,
+            .base = 10,
+            .r0 = rsp.ptr,
+            .buffer = undefined,
+            .memory = m,
+            .here = m.items.ptr + m.items.len,
+        };
+    }
 
-        pub fn init(
-            reader: *std.Io.Reader,
-            writer: *std.Io.Writer,
-            sp: []const isize,
-            rsp: []const [*]const Instr,
-            m: *std.array_list.AlignedManaged(u8, alignment),
-        ) Self {
-            m.ensureUnusedCapacity(@sizeOf(Instr)) catch @panic("init cannot ensureUnusedCapacity");
-            return .{
-                .reader = reader,
-                .writer = writer,
-                .state = 0,
-                .latest = @ptrCast(&syscall0),
-                .s0 = sp.ptr,
-                .base = 10,
-                .r0 = rsp.ptr,
-                .buffer = undefined,
-                .memory = m,
-                .here = m.items.ptr + m.items.len,
-            };
-        }
+    pub inline fn next(self: *Self, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) void {
+        _ = target;
+        const tgt = ip[0].word;
+        return @call(.always_tail, tgt[0].code, .{ self, sp, rsp, ip[1..], tgt });
+    }
 
-        pub inline fn next(self: *Self, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) void {
-            _ = target;
-            const tgt = ip[0].word;
-            return @call(.always_tail, tgt[0].code, .{ self, sp, rsp, ip[1..], tgt });
-        }
+    fn key(self: *Self) !u8 {
+        return self.reader.takeByte();
+    }
 
-        fn key(self: *Self) !u8 {
-            return self.reader.takeByte();
-        }
+    pub fn word(self: *Self) !usize {
+        var ch: u8 = std.ascii.control_code.nul;
+        var i: usize = 0;
 
-        pub fn word(self: *Self) !usize {
-            var ch: u8 = std.ascii.control_code.nul;
-            var i: usize = 0;
-
-            while (ch <= ' ') {
-                ch = try self.key();
-                if (ch == '\\') { // comment ⇒ skip line
-                    while (ch != '\n') ch = try self.key();
-                }
+        while (ch <= ' ') {
+            ch = try self.key();
+            if (ch == '\\') { // comment ⇒ skip line
+                while (ch != '\n') ch = try self.key();
             }
-            while (ch > ' ') {
-                self.buffer[i] = ch;
-                i += 1;
-                ch = try self.key();
-            }
-            return i;
         }
-
-        pub fn find(self: Self, name: []u8) ?*const Word {
-            const mask = @intFromEnum(Flag.HIDDEN) | F_LENMASK;
-            var node: *const Word = self.latest;
-            while (node.flag & mask != name.len or !mem.eql(u8, node.name[0..name.len], name))
-                node = node.link orelse return null;
-
-            return node;
+        while (ch > ' ') {
+            self.buffer[i] = ch;
+            i += 1;
+            ch = try self.key();
         }
+        return i;
+    }
 
-        pub fn append(self: *Self, instr: Instr) void {
-            self.memory.items.len = @intFromPtr(self.here) - @intFromPtr(self.memory.items.ptr);
-            self.memory.appendSlice(mem.asBytes(&instr)) catch @panic("append cannot appendSlice");
-            self.here = self.memory.items.ptr + self.memory.items.len;
-        }
-    };
-}
+    pub fn find(self: Self, name: []u8) ?*const Word {
+        const mask = @intFromEnum(Flag.HIDDEN) | F_LENMASK;
+        var node: *const Word = self.latest;
+        while (node.flag & mask != name.len or !mem.eql(u8, node.name[0..name.len], name))
+            node = node.link orelse return null;
 
-const Interp = InterpAligned(.of(Instr));
+        return node;
+    }
+
+    pub fn append(self: *Self, instr: Instr) void {
+        self.memory.items.len = @intFromPtr(self.here) - @intFromPtr(self.memory.items.ptr);
+        self.memory.appendSlice(mem.asBytes(&instr)) catch @panic("append cannot appendSlice");
+        self.here = self.memory.items.ptr + self.memory.items.len;
+    }
+};
 
 /// In jonesforth, instructions are simply machine words with context-dependent
 /// semantics.  Zig's type system lets us be more explicit.
