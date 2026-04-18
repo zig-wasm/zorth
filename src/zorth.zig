@@ -118,7 +118,7 @@ const Interp = struct {
     pub inline fn next(self: *Self, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) void {
         _ = target;
         const tgt: [*]const Instr = @ptrFromInt(ip[0].word);
-        return @call(.always_tail, primitives[tgt[0].code], .{ self, sp, rsp, ip[1..], tgt });
+        return @call(.always_tail, primitive(tgt), .{ self, sp, rsp, ip[1..], tgt });
     }
 
     fn key(self: *Self) !u8 {
@@ -195,6 +195,10 @@ fn defword(
 
 const Code = fn (*Interp, [*]isize, [*][*]const Instr, [*]const Instr, [*]const Instr) callconv(conv) void;
 
+pub inline fn primitive(target: [*]const Instr) Code {
+    return primitives[target[0].code];
+}
+
 fn wrap(comptime stack: fn ([*]isize) callconv(.@"inline") [*]isize) Code {
     return struct {
         fn code(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
@@ -230,7 +234,7 @@ fn words(comptime data: []const []const Instr) []const Instr {
     return &code;
 }
 
-const primitives: [102]Code = .{
+const primitives: [104]Code = .{
     docol_, // 0
     wrap(_drop), // 1
     wrap(_swap), // 2
@@ -295,7 +299,7 @@ const primitives: [102]Code = .{
     value(@intFromEnum(syscalls.X64.read)), // 61
     value(@intFromEnum(syscalls.X64.write)), // 62
     value(@intFromEnum(syscalls.X64.creat)), // 63
-    value(@intFromEnum(syscalls.X64.brs)), // 64
+    value(@intFromEnum(syscalls.X64.brk)), // 64
     value(O_RDONLY), // 65
     value(O_WRONLY), // 66
     value(O_RDWR), // 67
@@ -319,20 +323,22 @@ const primitives: [102]Code = .{
     wrap(_tcfa), // 85
     _create, // 86
     _comma, // 87
-    _rbrac, // 88
-    _immediate, // 89
-    wrap(_hidden), // 90
-    _tick, // 91
-    _branch, // 92
-    _zbranch, // 93
-    _litstring, // 94
-    _tell, // 95
-    _interpret, // 96
-    _char, // 97
-    _execute, // 98
-    _syscall3, // 99
-    _syscall2, // 100
-    _syscall0, // 101
+    _lbrac, // 88
+    _rbrac, // 89
+    _immediate, // 90
+    wrap(_hidden), // 91
+    _tick, // 92
+    _branch, // 93
+    _zbranch, // 94
+    _litstring, // 95
+    _tell, // 96
+    _interpret, // 97
+    _char, // 98
+    _execute, // 99
+    wrap(_syscall3), // 100
+    wrap(_syscall2), // 101
+    wrap(_syscall1), // 102
+    wrap(_syscall0), // 103
 };
 
 inline fn _drop(sp: [*]isize) [*]isize {
@@ -860,32 +866,26 @@ fn _lbrac(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Inst
     self.state = 0;
     self.next(sp, rsp, ip, target);
 }
-const lbrac = defword(
-    &comma,
-    Flag.IMMED,
-    "[",
-    _lbrac,
-    &.{},
-);
+const lbrac = defword(&comma, Flag.IMMED, "[", 88, &.{});
 
 fn _rbrac(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     self.state = 1;
     self.next(sp, rsp, ip, target);
 }
-const rbrac = defword(&lbrac, Flag.ZERO, "]", 88, &.{});
+const rbrac = defword(&lbrac, Flag.ZERO, "]", 89, &.{});
 
 fn _immediate(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     self.latest.flag ^= @intFromEnum(Flag.IMMED);
     self.next(sp, rsp, ip, target);
 }
-const immediate = defword(&rbrac, Flag.IMMED, "IMMEDIATE", 89, &.{});
+const immediate = defword(&rbrac, Flag.IMMED, "IMMEDIATE", 90, &.{});
 
 inline fn _hidden(sp: [*]isize) [*]isize {
     const w: *Word = @ptrFromInt(@abs(sp[0]));
     w.flag ^= @intFromEnum(Flag.HIDDEN);
     return sp[1..];
 }
-const hidden = defword(&immediate, Flag.ZERO, "HIDDEN", 90, &.{});
+const hidden = defword(&immediate, Flag.ZERO, "HIDDEN", 91, &.{});
 const hide = defword(
     &hidden,
     Flag.ZERO,
@@ -906,7 +906,7 @@ fn _tick(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr
     s[0] = @intCast(ip[0].word);
     self.next(s, rsp, ip[1..], target);
 }
-const tick = defword(&colon, Flag.ZERO, "'", 91, &.{});
+const tick = defword(&colon, Flag.ZERO, "'", 92, &.{});
 const semicolon = defword(
     &tick,
     Flag.IMMED,
@@ -921,14 +921,14 @@ fn _branch(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Ins
     const p = if (n < 0) ip - a else ip + a;
     self.next(sp, rsp, p, target);
 }
-const branch = defword(&semicolon, Flag.ZERO, "BRANCH", 92, &.{});
+const branch = defword(&semicolon, Flag.ZERO, "BRANCH", 93, &.{});
 
 fn _zbranch(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     if (sp[0] == 0)
         return @call(.always_tail, _branch, .{ self, sp[1..], rsp, ip, target });
     self.next(sp[1..], rsp, ip[1..], target);
 }
-const zbranch = defword(&branch, Flag.ZERO, "0BRANCH", 93, &.{});
+const zbranch = defword(&branch, Flag.ZERO, "0BRANCH", 94, &.{});
 
 fn _litstring(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const c = @abs(ip[0].literal);
@@ -938,7 +938,7 @@ fn _litstring(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
     const n = @abs(1 + @divTrunc(c + @sizeOf(Instr), @sizeOf(Instr)));
     self.next(s, rsp, ip[n..], target);
 }
-const litstring = defword(&zbranch, Flag.ZERO, "LITSTRING", 94, &.{});
+const litstring = defword(&zbranch, Flag.ZERO, "LITSTRING", 95, &.{});
 
 fn _tell(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const p: [*]u8 = @ptrFromInt(@abs(sp[1]));
@@ -946,7 +946,7 @@ fn _tell(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr
     self.writer.flush() catch {};
     self.next(sp[2..], rsp, ip, target);
 }
-const tell = defword(&litstring, Flag.ZERO, "TELL", 95, &.{});
+const tell = defword(&litstring, Flag.ZERO, "TELL", 96, &.{});
 
 fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const c = self.word() catch return;
@@ -956,7 +956,7 @@ fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
         const tgt = codeFieldAddress(@ptrCast(new));
         const instrs: [*]const Instr = @ptrFromInt(tgt);
         if ((new.flag & @intFromEnum(Flag.IMMED)) != 0 or self.state == 0) {
-            return @call(.always_tail, primitives[instrs[0].code], .{ self, sp, rsp, ip, instrs });
+            return @call(.always_tail, primitive(instrs), .{ self, sp, rsp, ip, instrs });
         } else {
             self.append(.{ .word = tgt });
         }
@@ -976,7 +976,7 @@ fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
     }
     self.next(s, rsp, ip, target);
 }
-const interpret = defword(&tell, Flag.ZERO, "INTERPRET", 96, &.{});
+const interpret = defword(&tell, Flag.ZERO, "INTERPRET", 97, &.{});
 const _quit: [6]Instr = .{
     .{ .word = codeFieldAddress(&rz) },
     .{ .word = codeFieldAddress(&rspstore) },
@@ -993,14 +993,14 @@ fn _char(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr
     s[0] = self.buffer[0];
     self.next(s, rsp, ip, target);
 }
-const char = defword(&quit, Flag.ZERO, "CHAR", 97, &.{});
+const char = defword(&quit, Flag.ZERO, "CHAR", 98, &.{});
 
 fn _execute(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     _ = target;
     const target_: [*]const Instr = @ptrFromInt(@abs(sp[0]));
-    return @call(.always_tail, primitives[target_[0].code], .{ self, sp[1..], rsp, ip, target_ });
+    return @call(.always_tail, primitive(target_), .{ self, sp[1..], rsp, ip, target_ });
 }
-const execute = defword(&char, Flag.ZERO, "EXECUTE", 98, &.{});
+const execute = defword(&char, Flag.ZERO, "EXECUTE", 99, &.{});
 
 inline fn _syscall3(sp: [*]isize) [*]isize {
     const number_: syscalls.X64 = @enumFromInt(sp[0]);
@@ -1030,7 +1030,7 @@ inline fn _syscall3(sp: [*]isize) [*]isize {
     }
     return sp[3..];
 }
-const syscall3 = defword(&execute, Flag.ZERO, "SYSCALL3", 99, wrap(_syscall3));
+const syscall3 = defword(&execute, Flag.ZERO, "SYSCALL3", 100, &.{});
 
 inline fn _syscall2(sp: [*]isize) [*]isize {
     const number_: syscalls.X64 = @enumFromInt(sp[0]);
@@ -1045,7 +1045,7 @@ inline fn _syscall2(sp: [*]isize) [*]isize {
     }
     return sp[2..];
 }
-const syscall2 = defword(&syscall3, Flag.ZERO, "SYSCALL2", 100, wrap(_syscall2));
+const syscall2 = defword(&syscall3, Flag.ZERO, "SYSCALL2", 101, &.{});
 
 fn _syscall1(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const number_: syscalls.X64 = @enumFromInt(sp[0]);
@@ -1077,7 +1077,7 @@ fn _syscall1(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const I
     }
     self.next(sp[1..], rsp, ip, target);
 }
-const syscall1 = defword(&syscall2, Flag.ZERO, "SYSCALL1", 101, &.{.{ .code = _syscall1 }});
+const syscall1 = defword(&syscall2, Flag.ZERO, "SYSCALL1", 102, &.{});
 
 inline fn _syscall0(sp: [*]isize) [*]isize {
     const number_: syscalls.X64 = @enumFromInt(sp[0]);
@@ -1092,7 +1092,7 @@ inline fn _syscall0(sp: [*]isize) [*]isize {
     }
     return sp;
 }
-var syscall0 = defword(&syscall1, Flag.ZERO, "SYSCALL0", wrap(_syscall0), &.{});
+var syscall0 = defword(&syscall1, Flag.ZERO, "SYSCALL0", 103, &.{});
 
 var memory: [0x800000]u8 linksection(".bss") = undefined;
 
@@ -1110,7 +1110,7 @@ fn run(reader: *std.Io.Reader, writer: *std.Io.Writer) void {
     const cold_start: [1]Instr = .{.{ .word = @intFromPtr(target) }};
     const ip: [*]const Instr = &cold_start;
 
-    primitives[target[0].code](&env, sp, rsp, ip, target);
+    primitive(target)(&env, sp, rsp, ip, target);
 }
 
 pub fn main() callconv(conv) void {
