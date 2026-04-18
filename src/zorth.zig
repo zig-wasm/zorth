@@ -692,7 +692,7 @@ fn dodoes_(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Ins
     const s = sp - 1;
     r[0] = ip;
     s[0] = @intCast(@intFromPtr(&target[2]));
-    self.next(s, r, target[1].word, target);
+    self.next(s, r, @ptrFromInt(target[1].word), target);
 }
 
 inline fn _dodoes(sp: [*]isize) [*]isize {
@@ -816,7 +816,7 @@ const find_ = defword(&number, Flag.ZERO, "FIND", 84, &.{});
 
 inline fn _tcfa(sp: [*]isize) [*]isize {
     const w: [*]const Instr = @ptrFromInt(@abs(sp[0]));
-    sp[0] = @intCast(@intFromPtr(codeFieldAddress(w)));
+    sp[0] = @intCast(codeFieldAddress(w));
     return sp;
 }
 const tcfa = defword(&find_, Flag.ZERO, ">CFA", 85, &.{});
@@ -903,8 +903,7 @@ const colon = defword(
 
 fn _tick(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     const s = sp - 1;
-    const u = @intFromPtr(ip[0].word);
-    s[0] = @intCast(u);
+    s[0] = @intCast(ip[0].word);
     self.next(s, rsp, ip[1..], target);
 }
 const tick = defword(&colon, Flag.ZERO, "'", 91, &.{});
@@ -955,14 +954,15 @@ fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const 
 
     if (self.find(self.buffer[0..c])) |new| {
         const tgt = codeFieldAddress(@ptrCast(new));
+        const instrs: [*]const Instr = @ptrFromInt(tgt);
         if ((new.flag & @intFromEnum(Flag.IMMED)) != 0 or self.state == 0) {
-            return @call(.always_tail, primitives[tgt[0].code], .{ self, sp, rsp, ip, tgt });
+            return @call(.always_tail, primitives[instrs[0].code], .{ self, sp, rsp, ip, instrs });
         } else {
             self.append(.{ .word = tgt });
         }
     } else if (fmt.parseInt(isize, self.buffer[0..c], @truncate(@abs(self.base)))) |a| {
         if (self.state == 1) {
-            self.append(.{ .word = codeFieldAddress(&lit) });
+            self.append(.{ .word = @intFromPtr(&.{.{ .code = 36 }}) });
             self.append(.{ .literal = a });
         } else {
             s = sp - 1;
@@ -997,8 +997,8 @@ const char = defword(&quit, Flag.ZERO, "CHAR", 97, &.{});
 
 fn _execute(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
     _ = target;
-    const target_: *Instr = @ptrFromInt(@abs(sp[0]));
-    return @call(.always_tail, target_.code, .{ self, sp[1..], rsp, ip, target_[0..0] });
+    const target_: [*]const Instr = @ptrFromInt(@abs(sp[0]));
+    return @call(.always_tail, primitives[target_[0].code], .{ self, sp[1..], rsp, ip, target_ });
 }
 const execute = defword(&char, Flag.ZERO, "EXECUTE", 98, &.{});
 
@@ -1103,11 +1103,11 @@ fn run(reader: *std.Io.Reader, writer: *std.Io.Writer) void {
     var return_stack: [N][*]const Instr = undefined;
     const rsp = return_stack[N..];
     var fba: std.heap.FixedBufferAllocator = .init(&memory);
-    var m: std.array_list.AlignedManaged(u8, .of(Instr)) = .init(fba.allocator());
+    var m: std.array_list.AlignedManaged(u8, .of(usize)) = .init(fba.allocator());
     defer m.deinit();
     var env: Interp = .init(reader, writer, sp, rsp, &m);
-    const target = &_quit;
-    const cold_start: [1]Instr = .{.{ .word = codeFieldAddress(target) }};
+    const target: [*]const Instr = &quit[offset];
+    const cold_start: [1]Instr = .{.{ .word = @intFromPtr(target) }};
     const ip: [*]const Instr = &cold_start;
 
     primitives[target[0].code](&env, sp, rsp, ip, target);
