@@ -201,7 +201,7 @@ fn value(comptime literal: isize) []const Instr {
 }
 
 fn words(comptime data: []const []const Instr) []const Instr {
-    var code: [data.len + 1]Instr = undefined;
+    comptime var code: [data.len + 1]Instr = undefined;
     code[0].code = docol_;
     inline for (code[1..], data) |*d, s|
         d.word = codeFieldAddress(s.ptr);
