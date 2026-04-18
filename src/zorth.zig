@@ -12,12 +12,14 @@
 //! words map to Zig functions which are only ever tail called.
 const std = @import("std");
 const fmt = std.fmt;
-const fs = std.fs;
 const mem = std.mem;
 const os = std.os;
 const syscalls = os.linux.syscalls;
 const testing = std.testing;
-const arch = @import("builtin").cpu.arch;
+const builtin = @import("builtin");
+const arch = builtin.cpu.arch;
+
+var static_threaded: std.Io.Threaded = .init_single_threaded;
 
 const conv: std.builtin.CallingConvention = switch (arch) {
     .x86_64 => .winapi,
@@ -51,6 +53,29 @@ const offset = @divExact(@sizeOf(Word), @sizeOf(Instr));
 
 inline fn codeFieldAddress(w: [*]const Instr) [*]const Instr {
     return w + offset;
+}
+
+inline fn openFlags(flags: usize) std.c.O {
+    return switch (builtin.os.tag) {
+        .emscripten => .{
+            .ACCMODE = @enumFromInt(flags & O_RDWR),
+            .CREAT = (flags & O_CREAT) != 0,
+            .EXCL = (flags & O_EXCL) != 0,
+            .TRUNC = (flags & O_TRUNC) != 0,
+            .APPEND = (flags & O_APPEND) != 0,
+            .NONBLOCK = (flags & O_NONBLOCK) != 0,
+        },
+        .wasi => .{
+            .read = (flags & O_WRONLY) == 0,
+            .write = (flags & O_RDONLY) == 0,
+            .CREAT = (flags & O_CREAT) != 0,
+            .EXCL = (flags & O_EXCL) != 0,
+            .TRUNC = (flags & O_TRUNC) != 0,
+            .APPEND = (flags & O_APPEND) != 0,
+            .NONBLOCK = (flags & O_NONBLOCK) != 0,
+        },
+        else => unreachable,
+    };
 }
 
 fn InterpAligned(comptime alignment: mem.Alignment) type {
@@ -884,31 +909,24 @@ inline fn _syscall3(sp: [*]isize) [*]isize {
 
     switch (number_) {
         .open => {
-            const p: usize = @intCast(sp[1]);
+            const p: usize = @abs(sp[1]);
             const file_path: [*:0]u8 = @ptrFromInt(p);
-            const flags: u32 = @intCast(sp[2]);
-            const perm: fs.File.Mode = @intCast(sp[3]);
-            sp[3] = if (fs.cwd().createFileZ(file_path, .{
-                .read = (flags & (O_RDONLY | O_RDWR)) != 0,
-                .truncate = (flags & O_TRUNC) != 0,
-                .exclusive = (flags & O_EXCL) != 0,
-                .lock_nonblocking = (flags & O_NONBLOCK) != 0,
-                .mode = perm,
-            })) |file| @intCast(file.handle) else |_| -1;
+            const mode: std.c.mode_t = @abs(sp[3]);
+            sp[3] = std.c.openat(std.c.AT_FDCWD, file_path, openFlags(@abs(sp[2])), mode);
         },
         .read => {
-            const file: fs.File = .{ .handle = @intCast(sp[1]) };
-            const p: usize = @intCast(sp[2]);
+            const fd: std.c.fd_t = @intCast(sp[1]);
+            const p: usize = @abs(sp[2]);
             const buf: [*]u8 = @ptrFromInt(p);
             const n: usize = @intCast(sp[3]);
-            sp[3] = if (file.read(buf[0..n])) |m| @intCast(m) else |_| -1;
+            sp[3] = std.c.read(fd, buf, n);
         },
         .write => {
-            const file: fs.File = .{ .handle = @intCast(sp[1]) };
-            const p: usize = @intCast(sp[2]);
+            const fd: std.c.fd_t = @intCast(sp[1]);
+            const p: usize = @abs(sp[2]);
             const buf: [*]u8 = @ptrFromInt(p);
             const n: usize = @intCast(sp[3]);
-            sp[3] = if (file.write(buf[0..n])) |m| @intCast(m) else |_| -1;
+            sp[3] = std.c.write(fd, buf, n);
         },
         else => {},
     }
@@ -921,13 +939,9 @@ inline fn _syscall2(sp: [*]isize) [*]isize {
 
     switch (number_) {
         .open => {
-            const p: usize = @intCast(sp[1]);
+            const p: usize = @abs(sp[1]);
             const file_path: [*:0]u8 = @ptrFromInt(p);
-            const flags: u32 = @intCast(sp[2]);
-            sp[2] = if (fs.cwd().openFileZ(file_path, .{
-                .mode = @enumFromInt(flags & (O_RDONLY | O_WRONLY | O_RDWR)),
-                .lock_nonblocking = (flags & O_NONBLOCK) != 0,
-            })) |file| @intCast(file.handle) else |_| -1;
+            sp[2] = std.c.openat(std.c.AT_FDCWD, file_path, openFlags(@abs(sp[2])));
         },
         else => {},
     }
@@ -944,8 +958,8 @@ fn _syscall1(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const I
             std.process.exit(status);
         },
         .close => {
-            const file: fs.File = .{ .handle = @intCast(sp[1]) };
-            file.close();
+            const file: std.c.fd_t = @intCast(sp[1]);
+            std.c.close(file);
         },
         .brk => {
             const m = @abs(sp[1]);
@@ -1003,9 +1017,9 @@ fn run(reader: *std.Io.Reader, writer: *std.Io.Writer) void {
 
 pub fn main() callconv(conv) void {
     var stdin_buffer: [2048]u8 = undefined;
-    var stdin_reader = fs.File.stdin().reader(&stdin_buffer);
+    var stdin_reader = std.Io.File.stdin().reader(static_threaded.io(), &stdin_buffer);
     var stdout_buffer: [2048]u8 = undefined;
-    var stdout_writer = fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(static_threaded.io(), &stdout_buffer);
 
     run(&stdin_reader.interface, &stdout_writer.interface);
 }
