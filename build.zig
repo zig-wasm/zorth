@@ -24,10 +24,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/zorth.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     lib.rdynamic = true;
-    lib.linkLibC();
 
     var emcc_flags = zemscripten.emccDefaultFlags(b.allocator, .{
         .optimize = optimize,
