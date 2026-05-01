@@ -235,7 +235,8 @@ const Interp = struct {
     }
 
     pub inline fn slice(self: Self, address: usize, len: usize) []u8 {
-        return self.memory.items[address .. address + len];
+        // Bounds checking (removing .ptr) breaks HERE @
+        return self.memory.items.ptr[address .. address + len];
     }
 
     pub inline fn writeInt(self: Self, address: usize, val: i32) void {
@@ -248,13 +249,13 @@ const Interp = struct {
 
     pub fn find(self: Self, name: []const u8) ?*const Word.Data {
         const mask = @intFromEnum(Flag.HIDDEN) | F_LENMASK;
-        const words: [*]Word.Data = @ptrCast(self.memory.items.ptr);
-        var node = &words[@abs(self.readInt(@intFromEnum(Address.LATEST)))];
+        const buf = self.memory.items;
+        var node: *const Word.Data = @ptrCast(@alignCast(&buf[@abs(self.readInt(@intFromEnum(Address.LATEST)))]));
         while (node.flag & mask != name.len or !mem.eql(u8, node.name[0..name.len], name)) {
             const link = node.link;
             if (link == .sentinel)
                 return null;
-            node = &words[@intFromEnum(link)];
+            node = @ptrCast(@alignCast(&self.memory.items[@intFromEnum(link)]));
         }
         return node;
     }
@@ -296,9 +297,9 @@ const Code = fn (*Interp, usize, usize, usize, usize) callconv(conv) void;
 fn wrap(comptime stack: fn ([*]i32) callconv(.@"inline") [*]i32) Code {
     return struct {
         fn code(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-            const m: [*]align(4) u8 = self.memory.items.ptr;
-            const s = stack(@ptrCast(@alignCast(m + sp)));
-            self.next(@intFromPtr(s) - @intFromPtr(m), rsp, ip, target);
+            const s: [*]i32 = @ptrCast(@alignCast(self.memory.items[sp..]));
+            const t = stack(s);
+            self.next(@intFromPtr(t) - @intFromPtr(self.memory.items.ptr), rsp, ip, target);
         }
     }.code;
 }
@@ -306,15 +307,14 @@ fn wrap(comptime stack: fn ([*]i32) callconv(.@"inline") [*]i32) Code {
 fn value(comptime literal: i32) Code {
     return struct {
         fn code(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-            const s = sp - 1;
-            self.writeInt(s, literal);
-            self.next(s, rsp, ip, target);
+            self.writeInt(sp - 4, literal);
+            self.next(sp - 4, rsp, ip, target);
         }
     }.code;
 }
 
 inline fn _drop(sp: [*]i32) [*]i32 {
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _swap(sp: [*]i32) [*]i32 {
@@ -357,7 +357,7 @@ inline fn _nrot(sp: [*]i32) [*]i32 {
 }
 
 inline fn _twodrop(sp: [*]i32) [*]i32 {
-    return sp + 8;
+    return sp + 2;
 }
 
 inline fn _twodup(sp: [*]i32) [*]i32 {
@@ -407,17 +407,17 @@ inline fn _decrp(sp: [*]i32) [*]i32 {
 
 inline fn _add(sp: [*]i32) [*]i32 {
     sp[1] += sp[0];
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _sub(sp: [*]i32) [*]i32 {
     sp[1] -= sp[0];
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _mul(sp: [*]i32) [*]i32 {
     sp[1] *= sp[0];
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _divmod(sp: [*]i32) [*]i32 {
@@ -430,32 +430,32 @@ inline fn _divmod(sp: [*]i32) [*]i32 {
 
 inline fn _equ(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] == sp[0]) -1 else 0;
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _nequ(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] == sp[0]) 0 else -1;
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _lt(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] < sp[0]) -1 else 0;
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _gt(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] > sp[0]) -1 else 0;
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _le(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] <= sp[0]) -1 else 0;
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _ge(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] >= sp[0]) -1 else 0;
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _zequ(sp: [*]i32) [*]i32 {
@@ -490,17 +490,17 @@ inline fn _zge(sp: [*]i32) [*]i32 {
 
 inline fn _and(sp: [*]i32) [*]i32 {
     sp[1] &= sp[0];
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _or(sp: [*]i32) [*]i32 {
     sp[1] |= sp[0];
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _xor(sp: [*]i32) [*]i32 {
     sp[1] ^= sp[0];
-    return sp + 4;
+    return sp + 1;
 }
 
 inline fn _invert(sp: [*]i32) [*]i32 {
@@ -1031,7 +1031,7 @@ fn defwords(allocator: mem.Allocator) !std.array_list.AlignedManaged(u8, .@"4") 
     }
     memory.items.len += writer.end;
     writer.end = @intFromEnum(Address.STATE);
-    try writer.writeInt(u32, 1, arch.endian()); // .STATE
+    try writer.writeInt(u32, 0, arch.endian()); // .STATE
     try writer.writeInt(u32, @truncate(memory.items.len), arch.endian()); // .HERE
     try writer.writeInt(u32, latest, arch.endian()); // .LATEST
     try writer.writeInt(u32, 0x2_000, arch.endian()); // .S0
@@ -1179,18 +1179,18 @@ test forth {
     _ = preamble;
     const tests = .{
         .{ "65 EMIT ", "A" },
-        // .{ "777 65 EMIT ", "A" },
-        // .{ "32 DUP + 1+ EMIT ", "A" },
-        // .{ "16 DUP 2DUP + + + 1+ EMIT ", "A" },
-        // .{ "8 DUP * 1+ EMIT ", "A" },
-        // .{ "CHAR A EMIT ", "A" },
+        .{ "777 65 EMIT ", "A" },
+        .{ "32 DUP + 1+ EMIT ", "A" },
+        .{ "16 DUP 2DUP + + + 1+ EMIT ", "A" },
+        .{ "8 DUP * 1+ EMIT ", "A" },
+        .{ "CHAR A EMIT ", "A" },
         // .{ ": SLOW WORD FIND >CFA EXECUTE ; 65 SLOW EMIT ", "A" },
-        // .{ "65535 DSP@ 4 TELL ", "FFFF" },
-        // .{ "65535 DSP@ HERE @ 4 CMOVE HERE @ 4 TELL ", "FFFF" },
-        // .{ "3635 DSP@ 2 NUMBER DROP EMIT ", "A" },
-        // .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
-        // .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
-        // .{ "64 >R 1 RSP@ +! RSP@ 1 TELL ", "A" },
+        .{ "1179010630 DSP@ 4 TELL ", "FFFF" },
+        .{ "1179010630 DSP@ HERE @ 4 CMOVE HERE @ 4 TELL ", "FFFF" },
+        .{ "13622 DSP@ 2 NUMBER DROP EMIT ", "A" },
+        .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
+        .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
+        .{ "64 >R 1 RSP@ +! RSP@ 1 TELL ", "A" },
         // .{ preamble ++ "VERSION . ", "47 " },
         // .{ preamble ++ "CR ", "\n" },
         // .{ preamble ++ "0 1 > . 1 0 > . ", "0 -1 " },
