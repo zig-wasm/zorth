@@ -396,12 +396,12 @@ inline fn _decr(sp: [*]i32) [*]i32 {
 }
 
 inline fn _incrp(sp: [*]i32) [*]i32 {
-    sp[0] += @sizeOf(usize);
+    sp[0] += 4;
     return sp;
 }
 
 inline fn _decrp(sp: [*]i32) [*]i32 {
-    sp[0] -= @sizeOf(usize);
+    sp[0] -= 4;
     return sp;
 }
 
@@ -1197,15 +1197,15 @@ test forth {
         .{ preamble ++ "0 0 OR . 0 -1 OR . ", "0 -1 " },
         .{ preamble ++ "-1 -1 XOR . 0 -1 XOR . ", "0 -1 " },
         .{ preamble ++ "-1 INVERT . 0 INVERT . ", "0 -1 " },
-        // .{ preamble ++ "3 4 5 .S ", "5 4 3 " },
-        // .{ preamble ++ "1 2 3 4 2SWAP .S ", "2 1 4 3 " },
-        // .{ preamble ++ "F_IMMED F_HIDDEN .S ", "32 128 " },
-        // .{ preamble ++ ": CFA@ WORD FIND >CFA @ ; CFA@ >DFA DOCOL = . ", "-1 " },
-        // .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
-        // .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 4+ EXIT ;\n" },
-        // .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
+        .{ preamble ++ "3 4 5 .S ", "5 4 3 " },
+        .{ preamble ++ "1 2 3 4 2SWAP .S ", "2 1 4 3 " },
+        .{ preamble ++ "F_IMMED F_HIDDEN .S ", "32 128 " },
+        .{ preamble ++ ": CFA@ WORD FIND >CFA @ ; CFA@ >DFA DOCOL = . ", "-1 " },
+        .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
+        .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 4+ ;\n" },
+        .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
         // .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -8 ) ;\n" },
-        // .{ preamble ++ "SEE / ", ": / /MOD SWAP DROP ;\n" },
+        .{ preamble ++ "SEE / ", ": / /MOD SWAP DROP ;\n" },
         // .{
         //     preamble ++
         //         \\: FOO THROW ;
