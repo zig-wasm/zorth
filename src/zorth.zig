@@ -724,10 +724,9 @@ fn _zbranch(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) call
 
 fn _litstring(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     const c = self.readInt(ip);
-    self.writeInt(sp - 4, c);
-    self.writeInt(sp - 8, @intCast(ip + 4));
-    const n = @abs(1 + @divTrunc(c + @sizeOf(Address), @sizeOf(Address))); // FIXME
-    self.next(sp - 8, rsp, ip + n, target);
+    self.writeInt(sp - 4, @intCast(ip + 4));
+    self.writeInt(sp - 8, c);
+    self.next(sp - 8, rsp, (ip + @abs(c) + 7) & ~@as(usize, 3), target);
 }
 
 fn _tell(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
@@ -979,14 +978,14 @@ fn defwords(allocator: mem.Allocator) !std.array_list.AlignedManaged(u8, .@"4") 
     var buffer = memory.unusedCapacitySlice();
     var writer: std.Io.Writer = .fixed(buffer);
     writer.advance(@intFromEnum(Address.END));
-    for (0..106) |i| {
+    for (0..107) |i| {
         try writer.writeInt(u32, latest, arch.endian());
         latest = @truncate(writer.end - 4);
         const code: Word = @enumFromInt(switch (i) {
             0...83 => i + 1, // skip DOCOL
             85...90 => i, // >DFA is composite
             94...99 => i - 3, // : ; and HIDE are composite
-            101...105 => i - 4, // QUIT is composite
+            101...106 => i - 4, // QUIT is composite
             else => 0,
         });
         const name = switch (i) {
@@ -1077,14 +1076,14 @@ fn run(allocator: mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer,
     cold_start(&env, s0, 2 * s0, @intFromEnum(Address.COLD_START), 0);
 }
 
-// pub fn main(init: std.process.Init) void {
-//     var stdin_buffer: [2048]u8 = undefined;
-//     var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buffer);
-//     var stdout_buffer: [2048]u8 = undefined;
-//     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+pub fn main(init: std.process.Init) void {
+    var stdin_buffer: [2048]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buffer);
+    var stdout_buffer: [2048]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
 
-//     run(&stdin_reader.interface, &stdout_writer.interface, init.minimal.args.vector);
-// }
+    run(init.gpa, &stdin_reader.interface, &stdout_writer.interface, init.minimal.args.vector);
+}
 
 fn forth(input: []const u8, expected: [:0]const u8) !void {
     var reader: std.Io.Reader = .fixed(input);
@@ -1172,7 +1171,6 @@ test forth {
         \\: STRLEN DUP BEGIN DUP C@ 0<> WHILE 1+ REPEAT SWAP - ;
         \\
     ;
-    // _ = preamble;
     const tests = .{
         .{ "65 EMIT ", "A" },
         .{ "777 65 EMIT ", "A" },
@@ -1204,27 +1202,27 @@ test forth {
         .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
         .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 4+ ;\n" },
         .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
-        // .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -8 ) ;\n" },
+        .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -8 ) ;\n" },
         .{ preamble ++ "SEE / ", ": / /MOD SWAP DROP ;\n" },
-        // .{
-        //     preamble ++
-        //         \\: FOO THROW ;
-        //         \\: TEST-EXCEPTIONS 25 ['] FOO CATCH ?DUP IF ." FOO threw exception: " . CR DROP THEN ;
-        //         \\TEST-EXCEPTIONS
-        //     ,
-        //     "FOO threw exception: 25 \n",
-        // },
+        .{
+            preamble ++
+                \\: FOO THROW ;
+                \\: TEST-EXCEPTIONS 25 ['] FOO CATCH ?DUP IF ." FOO threw exception: " . CR DROP THEN ;
+                \\TEST-EXCEPTIONS 
+            ,
+            "FOO threw exception: 25 \n",
+        },
     };
 
     inline for (tests) |t|
         try forth(t.@"0", t.@"1");
 
-    // if (!arch.isWasm()) {
-    //     const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
-    //     defer testing.allocator.free(p);
+    if (!arch.isWasm()) {
+        const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
+        defer testing.allocator.free(p);
 
-    //     try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "4 ");
-    //     try forth(preamble ++ ": ARGC (ARGC) @ ; : ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(testing.environ.block.view().slice[0], 0));
-    //     try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
-    // }
+        // try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "4 ");
+        // try forth(preamble ++ ": ARGC (ARGC) @ ; : ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(testing.environ.block.view().slice[0], 0));
+        try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
+    }
 }
