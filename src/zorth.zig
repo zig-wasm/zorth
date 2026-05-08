@@ -188,19 +188,16 @@ const Interp = struct {
     memory: std.array_list.AlignedManaged(u8, .of(u32)),
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
-    argv: []const [*:0]const u8,
 
     pub fn init(
         memory: std.array_list.AlignedManaged(u8, .of(u32)),
         reader: *std.Io.Reader,
         writer: *std.Io.Writer,
-        argv: []const [*:0]const u8,
     ) Self {
         return .{
             .memory = memory,
             .reader = reader,
             .writer = writer,
-            .argv = argv,
         };
     }
 
@@ -218,7 +215,7 @@ const Interp = struct {
     pub fn word(self: *Self) ![]u8 {
         var ch: u8 = std.ascii.control_code.nul;
         var i: usize = 0;
-        var buffer = self.slice(@intFromEnum(Address.BUFFER), 0x20);
+        var buffer = self.slice(@offsetOf(Header, "buffer"), 0x20);
 
         while (ch <= ' ') {
             ch = try self.key();
@@ -250,7 +247,7 @@ const Interp = struct {
     pub fn find(self: Self, name: []const u8) ?*const Word.Data {
         const mask = @intFromEnum(Flag.HIDDEN) | F_LENMASK;
         const buf = self.memory.items;
-        var node: *const Word.Data = @ptrCast(@alignCast(&buf[@abs(self.readInt(@intFromEnum(Address.LATEST)))]));
+        var node: *const Word.Data = @ptrCast(@alignCast(&buf[@abs(self.readInt(@offsetOf(Header, "latest")))]));
         while (node.flag & mask != name.len or !mem.eql(u8, node.name[0..name.len], name)) {
             const link = node.link;
             if (link == .sentinel)
@@ -261,25 +258,31 @@ const Interp = struct {
     }
 
     pub fn append(self: *Self, instr: Address.Data) void {
-        self.memory.items.len = @abs(self.readInt(@intFromEnum(Address.HERE)));
+        self.memory.items.len = @abs(self.readInt(@offsetOf(Header, "here")));
         self.memory.appendSlice(mem.asBytes(&instr)) catch @panic("append cannot appendSlice");
-        self.writeInt(@intFromEnum(Address.HERE), @intCast(self.memory.items.len));
+        self.writeInt(@offsetOf(Header, "here"), @intCast(self.memory.items.len));
     }
+};
+
+const Header = extern struct {
+    stack: [2048]i32,
+    return_stack: [2048]u32,
+    input_buffer: [2048]u8,
+    output_buffer: [2048]u8,
+    state: u32,
+    here: u32,
+    latest: u32,
+    s0: u32,
+    base: u32,
+    cold_start: [1]u32,
+    buffer: [32]u8,
 };
 
 /// In jonesforth, instructions are simply machine words with context-dependent
 /// semantics.  Zig's type system lets us be more explicit.
 const Address = enum(u32) {
     sentinel,
-    STATE = 0x5000,
-    HERE = 0x5004,
-    LATEST = 0x5008,
-    S0 = 0x500C,
-    BASE = 0x5010,
-    COLD_START = 0x5014,
-    BUFFER = 0x5018,
-    END = 0x5038,
-    LIT = 0x5034 + 36 * 0x28, // should be @sizeOf(Word.Data)
+    LIT = @offsetOf(Header, "buffer") + 28 + 36 * 0x28, // should be @sizeOf(Word.Data)
     _,
 
     pub const Data = packed union {
@@ -573,14 +576,12 @@ fn _cmove(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callco
 
 fn _here(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     self.memory.ensureUnusedCapacity(@sizeOf(Address)) catch @panic("_here cannot ensureUnusedCapacity");
-    self.writeInt(sp - 4, @intFromEnum(Address.HERE));
+    self.writeInt(sp - 4, @offsetOf(Header, "here"));
     self.next(sp - 4, rsp, ip, target);
 }
 
 fn _argc(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    const u = @intFromPtr(self.argv.ptr - 1); // FIXME
-    self.writeInt(sp - 4, @intCast(u));
-    self.next(sp - 4, rsp, ip, target);
+    self.next(sp, rsp, ip, target);
 }
 
 fn docol(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
@@ -635,13 +636,13 @@ fn _emit(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callcon
 
 fn _word(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     const word = self.word() catch std.process.exit(0);
-    self.writeInt(sp - 4, @intFromEnum(Address.BUFFER));
+    self.writeInt(sp - 4, @offsetOf(Header, "buffer"));
     self.writeInt(sp - 8, @intCast(word.len));
     self.next(sp - 8, rsp, ip, target);
 }
 
 fn _number(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    if (fmt.parseInt(i32, self.slice(@abs(self.readInt(sp + 4)), @abs(self.readInt(sp))), @truncate(@abs(self.readInt(@intFromEnum(Address.BASE)))))) |num| {
+    if (fmt.parseInt(i32, self.slice(@abs(self.readInt(sp + 4)), @abs(self.readInt(sp))), @truncate(@abs(self.readInt(@offsetOf(Header, "base")))))) |num| {
         self.writeInt(sp, 0);
         self.writeInt(sp + 4, num);
     } else |_| {}
@@ -664,16 +665,16 @@ inline fn _tcfa(sp: [*]i32) [*]i32 {
 fn _create(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     const name = self.slice(@abs(self.readInt(sp + 4)), @abs(self.readInt(sp)));
     var word: Word.Data = .{
-        .link = @enumFromInt(self.readInt(@intFromEnum(Address.LATEST))),
+        .link = @enumFromInt(self.readInt(@offsetOf(Header, "latest"))),
         .flag = @truncate(name.len),
         .name = @splat(0),
         .code = undefined,
     };
     @memcpy(word.name[0..name.len], name);
-    self.writeInt(@intFromEnum(Address.LATEST), @intCast(self.memory.items.len));
+    self.writeInt(@offsetOf(Header, "latest"), @intCast(self.memory.items.len));
     self.memory.appendSlice(mem.asBytes(&word)) catch @panic("_create cannot appendSlice");
     self.memory.items.len -= 4; // .code is undefined
-    self.writeInt(@intFromEnum(Address.HERE), @intCast(self.memory.items.len));
+    self.writeInt(@offsetOf(Header, "here"), @intCast(self.memory.items.len));
     self.next(sp + 8, rsp, ip, target);
 }
 
@@ -683,17 +684,17 @@ fn _comma(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callco
 }
 
 fn _lbrac(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    self.writeInt(@intFromEnum(Address.STATE), 0);
+    self.writeInt(@offsetOf(Header, "state"), 0);
     self.next(sp, rsp, ip, target);
 }
 
 fn _rbrac(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    self.writeInt(@intFromEnum(Address.STATE), 1);
+    self.writeInt(@offsetOf(Header, "state"), 1);
     self.next(sp, rsp, ip, target);
 }
 
 fn _immediate(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    const w: *Word.Data = @ptrCast(@alignCast(self.slice(@abs(self.readInt(@intFromEnum(Address.LATEST))), @sizeOf(Word.Data))));
+    const w: *Word.Data = @ptrCast(@alignCast(self.slice(@abs(self.readInt(@offsetOf(Header, "latest"))), @sizeOf(Word.Data))));
     w.flag ^= @intFromEnum(Flag.IMMED);
     self.next(sp, rsp, ip, target);
 }
@@ -743,13 +744,13 @@ fn _interpret(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) ca
 
     if (self.find(word)) |new| {
         const tgt = @intFromPtr(&new.code) - @intFromPtr(self.memory.items.ptr);
-        if ((new.flag & @intFromEnum(Flag.IMMED)) != 0 or self.readInt(@intFromEnum(Address.STATE)) == 0) {
+        if ((new.flag & @intFromEnum(Flag.IMMED)) != 0 or self.readInt(@offsetOf(Header, "state")) == 0) {
             return @call(.always_tail, primitives[@intFromEnum(new.code)], .{ self, sp, rsp, ip, tgt });
         } else {
             self.append(.{ .word = @enumFromInt(tgt) });
         }
-    } else if (fmt.parseInt(i32, word, @intCast(self.readInt(@intFromEnum(Address.BASE))))) |a| {
-        if (self.readInt(@intFromEnum(Address.STATE)) == 1) {
+    } else if (fmt.parseInt(i32, word, @intCast(self.readInt(@offsetOf(Header, "base"))))) |a| {
+        if (self.readInt(@offsetOf(Header, "state")) == 1) {
             self.append(.{ .word = .LIT });
             self.append(.{ .literal = a });
         } else {
@@ -912,11 +913,11 @@ const primitives = [_]*const Code{
     _fetchbyte,
     _ccopy,
     _cmove,
-    value(@intFromEnum(Address.STATE)),
-    value(@intFromEnum(Address.HERE)),
-    value(@intFromEnum(Address.LATEST)),
-    value(@intFromEnum(Address.S0)),
-    value(@intFromEnum(Address.BASE)),
+    value(@offsetOf(Header, "state")),
+    value(@offsetOf(Header, "here")),
+    value(@offsetOf(Header, "latest")),
+    value(@offsetOf(Header, "s0")),
+    value(@offsetOf(Header, "base")),
     _argc,
     value(47),
     value(0x4_000),
@@ -972,15 +973,14 @@ const primitives = [_]*const Code{
     wrap(_syscall0),
 };
 
-fn defwords(allocator: mem.Allocator) !std.array_list.AlignedManaged(u8, .@"4") {
+const numBytes = @sizeOf(Header) + @sizeOf(Word.Data) * 107 + 30 * @sizeOf(Address.Data);
+fn defwords() [numBytes]u8 {
+    @setEvalBranchQuota(5_000);
     var latest: u32 = 0;
-    var memory: std.array_list.Aligned(u8, .@"4") = try .initCapacity(allocator, 64 * 1024);
-    var buffer = memory.unusedCapacitySlice();
-    var writer: std.Io.Writer = .fixed(buffer);
-    writer.advance(@intFromEnum(Address.END));
+    var buffer: [numBytes]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    writer.advance(@sizeOf(Header));
     for (0..107) |i| {
-        try writer.writeInt(u32, latest, arch.endian());
-        latest = @truncate(writer.end - 4);
         const code: Word = @enumFromInt(switch (i) {
             0...83 => i + 1, // skip DOCOL
             85...90 => i, // >DFA is composite
@@ -996,12 +996,18 @@ fn defwords(allocator: mem.Allocator) !std.array_list.AlignedManaged(u8, .@"4") 
             100 => "QUIT",
             else => @tagName(code),
         };
-        try writer.writeByte(@truncate(name.len | switch (i) {
-            87, 89, 92 => @intFromEnum(Flag.IMMED),
-            else => 0,
-        }));
-        writer.advance(F_LENMASK - try writer.write(name));
-        try writer.writeInt(u32, @intFromEnum(code), arch.endian());
+        var word: Word.Data = .{
+            .link = @enumFromInt(latest),
+            .flag = @truncate(name.len | switch (i) {
+                87, 89, 92 => @intFromEnum(Flag.IMMED),
+                else => 0,
+            }),
+            .name = @splat(0),
+            .code = code,
+        };
+        @memcpy(word.name[0..name.len], name);
+        latest = @truncate(writer.end);
+        writer.writeStruct(word, arch.endian()) catch @panic("defwords cannot write word");
 
         var it = mem.tokenizeScalar(u8, switch (i) {
             84 => ">CFA 4+ EXIT",
@@ -1019,28 +1025,39 @@ fn defwords(allocator: mem.Allocator) !std.array_list.AlignedManaged(u8, .@"4") 
                 var node = latest;
                 while (buffer[node + 4] & F_LENMASK != item.len or !mem.eql(u8, buffer[node + 5 ..][0..item.len], item))
                     node = mem.readInt(u32, buffer[node..][0..4], arch.endian());
-                try writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), arch.endian());
+                writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), arch.endian()) catch @panic("defwords cannot write node");
             }
         }
     }
-    memory.items.len += writer.end;
-    writer.end = @intFromEnum(Address.STATE);
-    try writer.writeInt(u32, 0, arch.endian()); // .STATE
-    try writer.writeInt(u32, @truncate(memory.items.len), arch.endian()); // .HERE
-    try writer.writeInt(u32, latest, arch.endian()); // .LATEST
-    try writer.writeInt(u32, 0x2_000, arch.endian()); // .S0
-    try writer.writeInt(u32, 10, arch.endian()); // .BASE
-    while (buffer[latest + 4] != 4 or !mem.eql(u8, buffer[latest + 5 ..][0..4], "QUIT"))
-        latest = mem.readInt(u32, buffer[latest..][0..4], arch.endian());
-    try writer.writeInt(u32, latest + @offsetOf(Word.Data, "code"), arch.endian()); // .COLD_START
-    return memory.toManaged(allocator);
+    std.debug.assert(writer.end == numBytes);
+
+    var quit = latest;
+    while (buffer[quit + 4] != 4 or !mem.eql(u8, buffer[quit + 5 ..][0..4], "QUIT"))
+        quit = mem.readInt(u32, buffer[quit..][0..4], arch.endian());
+
+    const header: Header = .{
+        .stack = @splat(0),
+        .return_stack = @splat(0),
+        .input_buffer = @splat(0),
+        .output_buffer = @splat(0),
+        .state = 0,
+        .here = numBytes,
+        .latest = latest,
+        .s0 = 0x2_000,
+        .base = 10,
+        .buffer = @splat(0),
+        .cold_start = .{quit + @offsetOf(Word.Data, "code")},
+    };
+    writer.undo(numBytes); // rewind to start
+    writer.writeStruct(header, arch.endian()) catch @panic("defwords cannot write header");
+    return buffer;
 }
 
+const initial: [numBytes]u8 align(4) = defwords();
+
 test "defwords" {
-    const memory = try defwords(testing.allocator);
-    defer memory.deinit();
-    const start = @intFromEnum(Address.END);
-    const words: [*]const Word.Data = @ptrCast(memory.items[start..]);
+    const start = @sizeOf(Header);
+    const words: [*]const Word.Data = @ptrCast(initial[start..]);
     try testing.expectEqual(.sentinel, words[0].link);
     try testing.expectEqualSlices(u8, "DROP", words[0].name[0..words[0].flag]);
     try testing.expectEqual(.DROP, words[0].code);
@@ -1056,41 +1073,50 @@ test "defwords" {
     // >DFA's first data field occupies words[85].link
     try testing.expectEqual(@as(Address, @enumFromInt(codeFieldAddress(words[84].link))), words[85].link);
 
-    var node: u32 = @intFromEnum(Address.COLD_START); // points to CFA of "QUIT"
-    node = mem.readInt(u32, memory.items[node..][0..4], arch.endian());
-    try testing.expectEqual(0, mem.readInt(u32, memory.items[node..][0..4], arch.endian())); // CFA of "QUIT" is DOCOL ✓
-    node = mem.readInt(u32, memory.items[node + 4 ..][0..4], arch.endian()); // follow link to CFA of "R0"
-    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, memory.items[node..][0..4], arch.endian())); // CFA of "R0" is R0 ✓
+    var node: u32 = @offsetOf(Header, "cold_start"); // points to CFA of "QUIT"
+    node = mem.readInt(u32, initial[node..][0..4], arch.endian());
+    try testing.expectEqual(0, mem.readInt(u32, initial[node..][0..4], arch.endian())); // CFA of "QUIT" is DOCOL ✓
+    node = mem.readInt(u32, initial[node + 4 ..][0..4], arch.endian()); // follow link to CFA of "R0"
+    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, initial[node..][0..4], arch.endian())); // CFA of "R0" is R0 ✓
 }
 
 fn cold_start(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     self.next(sp, rsp, ip, target);
 }
 
-fn run(allocator: mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, argv: []const [*:0]const u8) !void {
-    var memory = try defwords(allocator);
-    defer memory.deinit();
-    var env: Interp = .init(memory, reader, writer, argv);
-    const s0 = @abs(env.readInt(@intFromEnum(Address.S0)));
+fn run(memory: std.array_list.AlignedManaged(u8, .@"4"), reader: *std.Io.Reader, writer: *std.Io.Writer) void {
+    var env: Interp = .init(memory, reader, writer);
 
-    cold_start(&env, s0, 2 * s0, @intFromEnum(Address.COLD_START), 0);
+    cold_start(
+        &env,
+        @offsetOf(Header, "return_stack"),
+        @offsetOf(Header, "input_buffer"),
+        @offsetOf(Header, "cold_start"),
+        0,
+    );
 }
 
-pub fn main(init: std.process.Init) void {
-    var stdin_buffer: [2048]u8 = undefined;
-    var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buffer);
-    var stdout_buffer: [2048]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+pub fn main(init: std.process.Init) !void {
+    var memory: std.array_list.AlignedManaged(u8, .@"4") = try .initCapacity(init.gpa, 0x10_000);
+    defer memory.deinit();
+    try memory.appendSlice(initial[0..]);
+    var header: *Header = @ptrCast(memory.items.ptr);
+    var stdin_reader = std.Io.File.stdin().reader(init.io, header.input_buffer[0..]);
+    var stdout_writer = std.Io.File.stdout().writer(init.io, header.output_buffer[0..]);
 
-    run(init.gpa, &stdin_reader.interface, &stdout_writer.interface, init.minimal.args.vector);
+    run(memory, &stdin_reader.interface, &stdout_writer.interface);
 }
 
 fn forth(input: []const u8, expected: [:0]const u8) !void {
+    var memory: std.array_list.AlignedManaged(u8, .@"4") = try .initCapacity(testing.allocator, 0x10_000);
+    defer memory.deinit();
+    try memory.appendSlice(initial[0..]);
+
     var reader: std.Io.Reader = .fixed(input);
 
     var actual = mem.zeroes([2048]u8);
     var writer: std.Io.Writer = .fixed(&actual);
-    try run(testing.allocator, &reader, &writer, &.{});
+    run(memory, &reader, &writer);
     try testing.expectEqualSlices(u8, expected, mem.sliceTo(actual[0..], 0));
 }
 
@@ -1221,8 +1247,6 @@ test forth {
         const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
         defer testing.allocator.free(p);
 
-        // try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "4 ");
-        // try forth(preamble ++ ": ARGC (ARGC) @ ; : ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(testing.environ.block.view().slice[0], 0));
         try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
     }
 }
