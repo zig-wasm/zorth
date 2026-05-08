@@ -819,7 +819,7 @@ inline fn _syscall2(sp: [*]i32) [*]i32 {
         },
         else => {},
     }
-    return sp + 8;
+    return sp[2..];
 }
 
 fn _syscall1(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
@@ -835,18 +835,10 @@ fn _syscall1(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) cal
             self.writeInt(sp + 4, std.c.close(file));
         },
         .brk => {
-            const m = @abs(self.readInt(sp + 4));
-            const p: *std.heap.FixedBufferAllocator = @ptrCast(@alignCast(self.memory.allocator.ptr));
-            if (m > 0) {
-                const n = if (arch.isWasm())
-                    @wasmMemoryGrow(0, @divTrunc(m, 0x10_000))
-                else
-                    os.linux.syscall1(.brk, m);
-                if (n < m)
-                    @panic("brk syscall failed");
-                p.buffer.len = m - @intFromPtr(p.buffer.ptr);
-            }
-            self.writeInt(sp + 4, @intCast(p.buffer.len));
+            const m = self.memory.capacity;
+            const n = @abs(self.readInt(sp + 4));
+            self.memory.ensureTotalCapacityPrecise(m + n) catch @panic("_syscall1 cannot ensureTotalCapacityPrecise");
+            self.writeInt(sp + 4, @intCast(m));
         },
         else => {},
     }
@@ -1097,7 +1089,7 @@ fn run(memory: std.array_list.AlignedManaged(u8, .@"4"), reader: *std.Io.Reader,
 }
 
 pub fn main(init: std.process.Init) !void {
-    var memory: std.array_list.AlignedManaged(u8, .@"4") = try .initCapacity(init.gpa, 0x10_000);
+    var memory: std.array_list.AlignedManaged(u8, .@"4") = try .initCapacity(init.gpa, 0x20_000);
     defer memory.deinit();
     try memory.appendSlice(initial[0..]);
     var header: *Header = @ptrCast(memory.items.ptr);
