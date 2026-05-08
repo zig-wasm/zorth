@@ -24,10 +24,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/zorth.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     lib.rdynamic = true;
-    lib.linkLibC();
 
     var emcc_flags = zemscripten.emccDefaultFlags(b.allocator, .{
         .optimize = optimize,
@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) !void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/zorth.zig"),
             .target = b.resolveTargetQuery(.{}),
+            .link_libc = true,
         }),
     });
     const run_native_tests = b.addRunArtifact(native_tests);
@@ -89,6 +90,7 @@ pub fn build(b: *std.Build) !void {
                     .tail_call,
                 }),
             }),
+            .link_libc = true,
         }),
     });
     wasm_tests.setExecCmd(&.{ "wasmtime", null });

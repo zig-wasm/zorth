@@ -12,12 +12,12 @@
 //! words map to Zig functions which are only ever tail called.
 const std = @import("std");
 const fmt = std.fmt;
-const fs = std.fs;
 const mem = std.mem;
 const os = std.os;
 const syscalls = os.linux.syscalls;
 const testing = std.testing;
-const arch = @import("builtin").cpu.arch;
+const builtin = @import("builtin");
+const arch = builtin.cpu.arch;
 
 const conv: std.builtin.CallingConvention = switch (arch) {
     .x86_64 => .winapi,
@@ -29,213 +29,317 @@ const O_WRONLY = 0o1;
 const O_RDWR = 0o2;
 const O_CREAT = 0o100;
 const O_EXCL = 0o200;
-const O_TRUNC = 0o1000;
-const O_APPEND = 0o2000;
-const O_NONBLOCK = 0o4000;
+const O_TRUNC = 0o1_000;
+const O_APPEND = 0o2_000;
+const O_NONBLOCK = 0o4_000;
 const F_LENMASK = std.ascii.control_code.us;
 const Flag = enum(u8) { IMMED = 0x80, HIDDEN = ' ', ZERO = 0x0 };
 
-/// The layout of this `struct` is very important for introspection to work.
-/// Ideally, we would use [flexible array members](https://en.wikipedia.org/wiki/Flexible_array_member)
-/// but I'm not sure how they work in Zig.  So I lie a little and `Word` only
-/// represents metadata.  "Real" words are arrays of `Instr` whose first
-/// `offset` elements are disgustingly `@ptrCast`ed to a `Word` when
-/// necessary.  Ugh.
-const Word = extern struct {
-    link: ?*const Word,
-    flag: u8,
-    name: [F_LENMASK]u8 align(1),
+// https://matklad.github.io/2025/12/23/zig-newtypes-index-pattern.html
+const Word = enum(u32) {
+    DROP = 1,
+    SWAP,
+    DUP,
+    OVER,
+    ROT,
+    @"-ROT",
+    @"2DROP",
+    @"2DUP",
+    @"2SWAP",
+    @"?DUP",
+    @"1+",
+    @"1-",
+    @"4+",
+    @"4-",
+    @"+",
+    @"-",
+    @"*",
+    @"/MOD",
+    @"=",
+    @"<>",
+    @"<",
+    @">",
+    @"<=",
+    @">=",
+    @"0=",
+    @"0<>",
+    @"0<",
+    @"0>",
+    @"0<=",
+    @"0>=",
+    AND,
+    OR,
+    XOR,
+    INVERT,
+    EXIT,
+    LIT,
+    @"!",
+    @"@",
+    @"+!",
+    @"-!",
+    @"C!",
+    @"C@",
+    @"C@C!",
+    CMOVE,
+    STATE,
+    HERE,
+    LATEST,
+    S0,
+    BASE,
+    @"(ARGC)",
+    VERSION,
+    R0,
+    DOCOL,
+    F_IMMED,
+    F_HIDDEN,
+    F_LENMASK,
+    SYS_EXIT,
+    SYS_OPEN,
+    SYS_CLOSE,
+    SYS_READ,
+    SYS_WRITE,
+    SYS_CREAT,
+    SYS_BRK,
+    O_RDONLY,
+    O_WRONLY,
+    O_RDWR,
+    O_CREAT,
+    O_EXCL,
+    O_TRUNC,
+    O_APPEND,
+    O_NONBLOCK,
+    @">R",
+    @"R>",
+    @"RSP@",
+    @"RSP!",
+    RDROP,
+    @"DSP@",
+    @"DSP!",
+    KEY,
+    EMIT,
+    WORD,
+    NUMBER,
+    FIND,
+    @">CFA",
+    CREATE,
+    @",",
+    @"[",
+    @"]",
+    IMMEDIATE,
+    HIDDEN,
+    @"'",
+    BRANCH,
+    @"0BRANCH",
+    LITSTRING,
+    TELL,
+    INTERPRET,
+    CHAR,
+    EXECUTE,
+    SYSCALL3,
+    SYSCALL2,
+    SYSCALL1,
+    SYSCALL0,
+    _,
+
+    /// The layout of this `struct` is very important for introspection to work.
+    /// Ideally, we would use [flexible array members](https://en.wikipedia.org/wiki/Flexible_array_member)
+    /// but I'm not sure how they work in Zig.  So I lie a little and `Word` only
+    /// represents metadata.  "Real" words are arrays of `Address` whose first
+    /// `offset` elements are disgustingly `@ptrCast`ed to a `Word` when
+    /// necessary.  Ugh.
+    pub const Data = extern struct {
+        link: Address,
+        flag: u8,
+        name: [F_LENMASK]u8 align(1),
+        code: Word,
+    };
 };
 
-const offset = @divExact(@sizeOf(Word), @sizeOf(Instr));
-
-inline fn codeFieldAddress(w: [*]const Instr) [*]const Instr {
-    return w + offset;
+inline fn codeFieldAddress(w: Address) usize {
+    return @intFromEnum(w) + @offsetOf(Word.Data, "code");
 }
 
-fn InterpAligned(comptime alignment: mem.Alignment) type {
-    return struct {
-        const Self = @This();
-
-        reader: *std.Io.Reader,
-        writer: *std.Io.Writer,
-        state: isize,
-        latest: *Word,
-        s0: [*]const isize,
-        base: isize,
-        r0: [*]const [*]const Instr,
-        buffer: [32]u8,
-        memory: *std.array_list.AlignedManaged(u8, alignment),
-        here: [*]u8,
-
-        pub fn init(
-            reader: *std.Io.Reader,
-            writer: *std.Io.Writer,
-            sp: []const isize,
-            rsp: []const [*]const Instr,
-            m: *std.array_list.AlignedManaged(u8, alignment),
-        ) Self {
-            m.ensureUnusedCapacity(@sizeOf(Instr)) catch @panic("init cannot ensureUnusedCapacity");
-            return .{
-                .reader = reader,
-                .writer = writer,
-                .state = 0,
-                .latest = @ptrCast(&syscall0),
-                .s0 = sp.ptr,
-                .base = 10,
-                .r0 = rsp.ptr,
-                .buffer = undefined,
-                .memory = m,
-                .here = m.items.ptr + m.items.len,
-            };
-        }
-
-        pub inline fn next(self: *Self, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) void {
-            _ = target;
-            const tgt = ip[0].word;
-            return @call(.always_tail, tgt[0].code, .{ self, sp, rsp, ip[1..], tgt });
-        }
-
-        fn key(self: *Self) !u8 {
-            return self.reader.takeByte();
-        }
-
-        pub fn word(self: *Self) !usize {
-            var ch: u8 = std.ascii.control_code.nul;
-            var i: usize = 0;
-
-            while (ch <= ' ') {
-                ch = try self.key();
-                if (ch == '\\') { // comment ⇒ skip line
-                    while (ch != '\n') ch = try self.key();
-                }
-            }
-            while (ch > ' ') {
-                self.buffer[i] = ch;
-                i += 1;
-                ch = try self.key();
-            }
-            return i;
-        }
-
-        pub fn find(self: Self, name: []u8) ?*const Word {
-            const mask = @intFromEnum(Flag.HIDDEN) | F_LENMASK;
-            var node: *const Word = self.latest;
-            while (node.flag & mask != name.len or !mem.eql(u8, node.name[0..name.len], name))
-                node = node.link orelse return null;
-
-            return node;
-        }
-
-        pub fn append(self: *Self, instr: Instr) void {
-            self.memory.items.len = @intFromPtr(self.here) - @intFromPtr(self.memory.items.ptr);
-            self.memory.appendSlice(mem.asBytes(&instr)) catch @panic("append cannot appendSlice");
-            self.here = self.memory.items.ptr + self.memory.items.len;
-        }
+inline fn openFlags(flags: usize) std.c.O {
+    return switch (builtin.os.tag) {
+        .emscripten => .{
+            .ACCMODE = @enumFromInt(flags & O_RDWR),
+            .CREAT = (flags & O_CREAT) != 0,
+            .EXCL = (flags & O_EXCL) != 0,
+            .TRUNC = (flags & O_TRUNC) != 0,
+            .APPEND = (flags & O_APPEND) != 0,
+            .NONBLOCK = (flags & O_NONBLOCK) != 0,
+        },
+        .wasi => .{
+            .read = (flags & O_WRONLY) == 0,
+            .write = (flags & O_RDONLY) == 0,
+            .CREAT = (flags & O_CREAT) != 0,
+            .EXCL = (flags & O_EXCL) != 0,
+            .TRUNC = (flags & O_TRUNC) != 0,
+            .APPEND = (flags & O_APPEND) != 0,
+            .NONBLOCK = (flags & O_NONBLOCK) != 0,
+        },
+        else => unreachable,
     };
 }
 
-const Interp = InterpAligned(.of(Instr));
+const Interp = struct {
+    const Self = @This();
+
+    memory: std.array_list.AlignedManaged(u8, .of(u32)),
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+
+    pub fn init(
+        memory: std.array_list.AlignedManaged(u8, .of(u32)),
+        reader: *std.Io.Reader,
+        writer: *std.Io.Writer,
+    ) Self {
+        return .{
+            .memory = memory,
+            .reader = reader,
+            .writer = writer,
+        };
+    }
+
+    pub inline fn next(self: *Self, sp: usize, rsp: usize, ip: usize, target: usize) void {
+        _ = target;
+        const tgt = @abs(self.readInt(ip));
+        const code = @abs(self.readInt(tgt));
+        return @call(.always_tail, primitives[code], .{ self, sp, rsp, ip + 4, tgt });
+    }
+
+    fn key(self: *Self) !u8 {
+        return self.reader.takeByte();
+    }
+
+    pub fn word(self: *Self) ![]u8 {
+        var ch: u8 = std.ascii.control_code.nul;
+        var i: usize = 0;
+        var buffer = self.slice(@offsetOf(Header, "buffer"), 0x20);
+
+        while (ch <= ' ') {
+            ch = try self.key();
+            if (ch == '\\') { // comment ⇒ skip line
+                while (ch != '\n') ch = try self.key();
+            }
+        }
+        while (ch > ' ') {
+            buffer[i] = ch;
+            i += 1;
+            ch = try self.key();
+        }
+        return buffer[0..i];
+    }
+
+    pub inline fn slice(self: Self, address: usize, len: usize) []u8 {
+        // Bounds checking (removing .ptr) breaks HERE @
+        return self.memory.items.ptr[address .. address + len];
+    }
+
+    pub inline fn writeInt(self: Self, address: usize, val: i32) void {
+        mem.writeInt(i32, self.memory.items[address..][0..4], val, arch.endian());
+    }
+
+    pub inline fn readInt(self: Self, address: usize) i32 {
+        return mem.readInt(i32, self.memory.items[address..][0..4], arch.endian());
+    }
+
+    pub fn find(self: Self, name: []const u8) ?*const Word.Data {
+        const mask = @intFromEnum(Flag.HIDDEN) | F_LENMASK;
+        const buf = self.memory.items;
+        var node: *const Word.Data = @ptrCast(@alignCast(&buf[@abs(self.readInt(@offsetOf(Header, "latest")))]));
+        while (node.flag & mask != name.len or !mem.eql(u8, node.name[0..name.len], name)) {
+            const link = node.link;
+            if (link == .sentinel)
+                return null;
+            node = @ptrCast(@alignCast(&self.memory.items[@intFromEnum(link)]));
+        }
+        return node;
+    }
+
+    pub fn append(self: *Self, instr: Address.Data) void {
+        self.memory.items.len = @abs(self.readInt(@offsetOf(Header, "here")));
+        self.memory.appendSlice(mem.asBytes(&instr)) catch @panic("append cannot appendSlice");
+        self.writeInt(@offsetOf(Header, "here"), @intCast(self.memory.items.len));
+    }
+};
+
+const Header = extern struct {
+    stack: [2048]i32,
+    return_stack: [2048]u32,
+    input_buffer: [2048]u8,
+    output_buffer: [2048]u8,
+    state: u32,
+    here: u32,
+    latest: u32,
+    s0: u32,
+    base: u32,
+    cold_start: [1]u32,
+    buffer: [32]u8,
+};
 
 /// In jonesforth, instructions are simply machine words with context-dependent
 /// semantics.  Zig's type system lets us be more explicit.
-const Instr = packed union {
-    /// built-in
-    code: *const fn (*Interp, [*]isize, [*][*]const Instr, [*]const Instr, [*]const Instr) callconv(conv) void,
-    /// LIT, LITSTRING, BRANCH, 0BRANCH, and ' are followed by one argument in the instruction stream
-    literal: isize,
-    /// written in Forth
-    word: [*]const Instr,
+const Address = enum(u32) {
+    sentinel,
+    LIT = @offsetOf(Header, "buffer") + 28 + 36 * 0x28, // should be @sizeOf(Word.Data)
+    _,
+
+    pub const Data = packed union {
+        /// built-in
+        code: Word,
+        /// LIT, LITSTRING, BRANCH, 0BRANCH, and ' are followed by one argument in the instruction stream
+        literal: i32,
+        /// written in Forth
+        word: Address,
+    };
 };
 
-const Source = union(enum) {
-    self: []const u8,
-    literal: isize,
-};
+const Code = fn (*Interp, usize, usize, usize, usize) callconv(conv) void;
 
-fn defword(
-    comptime last: ?[]const Instr,
-    comptime flag: Flag,
-    comptime name: []const u8,
-    comptime code: []const Instr,
-) [offset + code.len]Instr {
-    var instrs: [offset + code.len]Instr = undefined;
-    const p: *Word = @ptrCast(&instrs[0]);
-    p.link = if (last) |link| @ptrCast(link.ptr) else null;
-    p.flag = name.len | @intFromEnum(flag);
-    @memcpy(p.name[0..name.len], name);
-    @memset(p.name[name.len..F_LENMASK], 0);
-    @memcpy(instrs[offset..], code);
-    return instrs;
-}
-
-fn wrap(comptime stack: fn ([*]isize) callconv(.@"inline") [*]isize) []const Instr {
-    const t = struct {
-        fn code(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-            self.next(stack(sp), rsp, ip, target);
+fn wrap(comptime stack: fn ([*]i32) callconv(.@"inline") [*]i32) Code {
+    return struct {
+        fn code(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+            const s: [*]i32 = @ptrCast(@alignCast(self.memory.items[sp..]));
+            const t = stack(s);
+            self.next(@intFromPtr(t) - @intFromPtr(self.memory.items.ptr), rsp, ip, target);
         }
-    };
-    return &.{.{ .code = t.code }};
+    }.code;
 }
 
-fn attr(comptime name: []const u8) []const Instr {
-    const t = struct {
-        fn code(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-            const s = sp - 1;
-            s[0] = @intCast(@intFromPtr(&@field(self, name)));
-            self.next(s, rsp, ip, target);
+fn value(comptime literal: i32) Code {
+    return struct {
+        fn code(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+            self.writeInt(sp - 4, literal);
+            self.next(sp - 4, rsp, ip, target);
         }
-    };
-    return &.{.{ .code = t.code }};
+    }.code;
 }
 
-fn value(comptime literal: isize) []const Instr {
-    const t = struct {
-        fn code(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-            const s = sp - 1;
-            s[0] = literal;
-            self.next(s, rsp, ip, target);
-        }
-    };
-    return &.{.{ .code = t.code }};
+inline fn _drop(sp: [*]i32) [*]i32 {
+    return sp + 1;
 }
 
-fn words(comptime data: []const []const Instr) []const Instr {
-    var code: [data.len + 1]Instr = undefined;
-    code[0].code = docol_;
-    inline for (code[1..], data) |*d, s|
-        d.word = codeFieldAddress(s.ptr);
-    return &code;
-}
-
-inline fn _drop(sp: [*]isize) [*]isize {
-    return sp[1..];
-}
-const drop = defword(null, Flag.ZERO, "DROP", wrap(_drop));
-
-inline fn _swap(sp: [*]isize) [*]isize {
+inline fn _swap(sp: [*]i32) [*]i32 {
     const temp = sp[1];
     sp[1] = sp[0];
     sp[0] = temp;
     return sp;
 }
-const swap = defword(&drop, Flag.ZERO, "SWAP", wrap(_swap));
 
-inline fn _dup(sp: [*]isize) [*]isize {
+inline fn _dup(sp: [*]i32) [*]i32 {
     const s = sp - 1;
     s[0] = sp[0];
     return s;
 }
-const dup = defword(&swap, Flag.ZERO, "DUP", wrap(_dup));
 
-inline fn _over(sp: [*]isize) [*]isize {
+inline fn _over(sp: [*]i32) [*]i32 {
     const s = sp - 1;
     s[0] = sp[1];
     return s;
 }
-const over = defword(&dup, Flag.ZERO, "OVER", wrap(_over));
 
-inline fn _rot(sp: [*]isize) [*]isize {
+inline fn _rot(sp: [*]i32) [*]i32 {
     const a = sp[0];
     const b = sp[1];
     const c = sp[2];
@@ -244,9 +348,8 @@ inline fn _rot(sp: [*]isize) [*]isize {
     sp[0] = c;
     return sp;
 }
-const rot = defword(&over, Flag.ZERO, "ROT", wrap(_rot));
 
-inline fn _nrot(sp: [*]isize) [*]isize {
+inline fn _nrot(sp: [*]i32) [*]i32 {
     const a = sp[0];
     const b = sp[1];
     const c = sp[2];
@@ -255,22 +358,19 @@ inline fn _nrot(sp: [*]isize) [*]isize {
     sp[0] = b;
     return sp;
 }
-const nrot = defword(&rot, Flag.ZERO, "-ROT", wrap(_nrot));
 
-inline fn _twodrop(sp: [*]isize) [*]isize {
-    return sp[2..];
+inline fn _twodrop(sp: [*]i32) [*]i32 {
+    return sp + 2;
 }
-const twodrop = defword(&nrot, Flag.ZERO, "2DROP", wrap(_twodrop));
 
-inline fn _twodup(sp: [*]isize) [*]isize {
+inline fn _twodup(sp: [*]i32) [*]i32 {
     const s = sp - 2;
     s[1] = sp[1];
     s[0] = sp[0];
     return s;
 }
-const twodup = defword(&twodrop, Flag.ZERO, "2DUP", wrap(_twodup));
 
-inline fn _twoswap(sp: [*]isize) [*]isize {
+inline fn _twoswap(sp: [*]i32) [*]i32 {
     const a = sp[0];
     const b = sp[1];
     const c = sp[2];
@@ -281,693 +381,471 @@ inline fn _twoswap(sp: [*]isize) [*]isize {
     sp[0] = c;
     return sp;
 }
-const twoswap = defword(&twodup, Flag.ZERO, "2SWAP", wrap(_twoswap));
 
-inline fn _qdup(sp: [*]isize) [*]isize {
-    if (sp[0] != 0) {
-        const s = sp - 1;
-        s[0] = sp[0];
-        return s;
-    }
-    return sp;
+inline fn _qdup(sp: [*]i32) [*]i32 {
+    const s = if (sp[0] == 0) sp else sp - 1;
+    s[0] = sp[0]; // no-op when TOS is 0
+    return s;
 }
-const qdup = defword(&twoswap, Flag.ZERO, "?DUP", wrap(_qdup));
 
-inline fn _incr(sp: [*]isize) [*]isize {
+inline fn _incr(sp: [*]i32) [*]i32 {
     sp[0] += 1;
     return sp;
 }
-const incr = defword(&qdup, Flag.ZERO, "1+", wrap(_incr));
 
-inline fn _decr(sp: [*]isize) [*]isize {
+inline fn _decr(sp: [*]i32) [*]i32 {
     sp[0] -= 1;
     return sp;
 }
-const decr = defword(&incr, Flag.ZERO, "1-", wrap(_decr));
 
-inline fn _incrp(sp: [*]isize) [*]isize {
-    sp[0] += @sizeOf(usize);
+inline fn _incrp(sp: [*]i32) [*]i32 {
+    sp[0] += 4;
     return sp;
 }
-const incrp = defword(&decr, Flag.ZERO, fmt.comptimePrint("{d}+", .{@sizeOf(usize)}), wrap(_incrp));
 
-inline fn _decrp(sp: [*]isize) [*]isize {
-    sp[0] -= @sizeOf(usize);
+inline fn _decrp(sp: [*]i32) [*]i32 {
+    sp[0] -= 4;
     return sp;
 }
-const decrp = defword(&incrp, Flag.ZERO, fmt.comptimePrint("{d}-", .{@sizeOf(usize)}), wrap(_decrp));
 
-inline fn _add(sp: [*]isize) [*]isize {
+inline fn _add(sp: [*]i32) [*]i32 {
     sp[1] += sp[0];
-    return sp[1..];
+    return sp + 1;
 }
-const add = defword(&decrp, Flag.ZERO, "+", wrap(_add));
 
-inline fn _sub(sp: [*]isize) [*]isize {
+inline fn _sub(sp: [*]i32) [*]i32 {
     sp[1] -= sp[0];
-    return sp[1..];
+    return sp + 1;
 }
-const sub = defword(&add, Flag.ZERO, "-", wrap(_sub));
 
-inline fn _mul(sp: [*]isize) [*]isize {
+inline fn _mul(sp: [*]i32) [*]i32 {
     sp[1] *= sp[0];
-    return sp[1..];
+    return sp + 1;
 }
-const mul = defword(&sub, Flag.ZERO, "*", wrap(_mul));
 
-inline fn _divmod(sp: [*]isize) [*]isize {
+inline fn _divmod(sp: [*]i32) [*]i32 {
     const a = sp[1];
     const b = sp[0];
     sp[1] = @rem(a, b);
     sp[0] = @divTrunc(a, b);
     return sp;
 }
-const divmod = defword(&mul, Flag.ZERO, "/MOD", wrap(_divmod));
 
-inline fn _equ(sp: [*]isize) [*]isize {
+inline fn _equ(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] == sp[0]) -1 else 0;
-    return sp[1..];
+    return sp + 1;
 }
-const equ = defword(&divmod, Flag.ZERO, "=", wrap(_equ));
 
-inline fn _nequ(sp: [*]isize) [*]isize {
+inline fn _nequ(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] == sp[0]) 0 else -1;
-    return sp[1..];
+    return sp + 1;
 }
-const nequ = defword(&equ, Flag.ZERO, "<>", wrap(_nequ));
 
-inline fn _lt(sp: [*]isize) [*]isize {
+inline fn _lt(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] < sp[0]) -1 else 0;
-    return sp[1..];
+    return sp + 1;
 }
-const lt = defword(&nequ, Flag.ZERO, "<", wrap(_lt));
 
-inline fn _gt(sp: [*]isize) [*]isize {
+inline fn _gt(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] > sp[0]) -1 else 0;
-    return sp[1..];
+    return sp + 1;
 }
-const gt = defword(&lt, Flag.ZERO, ">", wrap(_gt));
 
-inline fn _le(sp: [*]isize) [*]isize {
+inline fn _le(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] <= sp[0]) -1 else 0;
-    return sp[1..];
+    return sp + 1;
 }
-const le = defword(&gt, Flag.ZERO, "<=", wrap(_le));
 
-inline fn _ge(sp: [*]isize) [*]isize {
+inline fn _ge(sp: [*]i32) [*]i32 {
     sp[1] = if (sp[1] >= sp[0]) -1 else 0;
-    return sp[1..];
+    return sp + 1;
 }
-const ge = defword(&le, Flag.ZERO, ">=", wrap(_ge));
 
-inline fn _zequ(sp: [*]isize) [*]isize {
+inline fn _zequ(sp: [*]i32) [*]i32 {
     sp[0] = if (sp[0] == 0) -1 else 0;
     return sp;
 }
-const zequ = defword(&ge, Flag.ZERO, "0=", wrap(_zequ));
 
-inline fn _znequ(sp: [*]isize) [*]isize {
+inline fn _znequ(sp: [*]i32) [*]i32 {
     sp[0] = if (sp[0] != 0) -1 else 0;
     return sp;
 }
-const znequ = defword(&zequ, Flag.ZERO, "0<>", wrap(_znequ));
 
-inline fn _zlt(sp: [*]isize) [*]isize {
+inline fn _zlt(sp: [*]i32) [*]i32 {
     sp[0] = if (sp[0] < 0) -1 else 0;
     return sp;
 }
-const zlt = defword(&znequ, Flag.ZERO, "0<", wrap(_zlt));
 
-inline fn _zgt(sp: [*]isize) [*]isize {
+inline fn _zgt(sp: [*]i32) [*]i32 {
     sp[0] = if (sp[0] > 0) -1 else 0;
     return sp;
 }
-const zgt = defword(&zlt, Flag.ZERO, "0>", wrap(_zgt));
 
-inline fn _zle(sp: [*]isize) [*]isize {
+inline fn _zle(sp: [*]i32) [*]i32 {
     sp[0] = if (sp[0] <= 0) -1 else 0;
     return sp;
 }
-const zle = defword(&zgt, Flag.ZERO, "0<=", wrap(_zle));
 
-inline fn _zge(sp: [*]isize) [*]isize {
+inline fn _zge(sp: [*]i32) [*]i32 {
     sp[0] = if (sp[0] >= 0) -1 else 0;
     return sp;
 }
-const zge = defword(&zle, Flag.ZERO, "0>=", wrap(_zge));
 
-inline fn _and(sp: [*]isize) [*]isize {
+inline fn _and(sp: [*]i32) [*]i32 {
     sp[1] &= sp[0];
-    return sp[1..];
+    return sp + 1;
 }
-const and_ = defword(&zge, Flag.ZERO, "AND", wrap(_and));
 
-inline fn _or(sp: [*]isize) [*]isize {
+inline fn _or(sp: [*]i32) [*]i32 {
     sp[1] |= sp[0];
-    return sp[1..];
+    return sp + 1;
 }
-const or_ = defword(&and_, Flag.ZERO, "OR", wrap(_or));
 
-inline fn _xor(sp: [*]isize) [*]isize {
+inline fn _xor(sp: [*]i32) [*]i32 {
     sp[1] ^= sp[0];
-    return sp[1..];
+    return sp + 1;
 }
-const xor = defword(&or_, Flag.ZERO, "XOR", wrap(_xor));
 
-inline fn _invert(sp: [*]isize) [*]isize {
+inline fn _invert(sp: [*]i32) [*]i32 {
     sp[0] = ~sp[0];
     return sp;
 }
-const invert = defword(&xor, Flag.ZERO, "INVERT", wrap(_invert));
 
-fn _exit(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
+fn _exit(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     _ = ip;
-    self.next(sp, rsp[1..], rsp[0], target);
-}
-const exit = defword(&invert, Flag.ZERO, "EXIT", &.{.{ .code = _exit }});
-
-fn _lit(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    s[0] = ip[0].literal;
-    self.next(s, rsp, ip[1..], target);
-}
-const lit = defword(&exit, Flag.ZERO, "LIT", &.{.{ .code = _lit }});
-
-inline fn _store(sp: [*]isize) [*]isize {
-    const p: *isize = @ptrFromInt(@abs(sp[0]));
-    p.* = sp[1];
-    return sp[2..];
-}
-const store = defword(&lit, Flag.ZERO, "!", wrap(_store));
-
-inline fn _fetch(sp: [*]isize) [*]isize {
-    const p: *isize = @ptrFromInt(@abs(sp[0]));
-    sp[0] = p.*;
-    return sp;
-}
-const fetch = defword(&store, Flag.ZERO, "@", wrap(_fetch));
-
-inline fn _addstore(sp: [*]isize) [*]isize {
-    const p: *[*]u8 = @ptrFromInt(@abs(sp[0]));
-    p.* += @abs(sp[1]);
-    return sp[2..];
-}
-const addstore = defword(&fetch, Flag.ZERO, "+!", wrap(_addstore));
-
-inline fn _substore(sp: [*]isize) [*]isize {
-    const p: *[*]u8 = @ptrFromInt(@abs(sp[0]));
-    p.* -= @abs(sp[1]);
-    return sp[2..];
-}
-const substore = defword(&addstore, Flag.ZERO, "-!", wrap(_substore));
-
-inline fn _storebyte(sp: [*]isize) [*]isize {
-    const p: [*]u8 = @ptrFromInt(@abs(sp[0]));
-    const v: u8 = @truncate(@abs(sp[1]));
-    p[0] = v;
-    return sp[2..];
-}
-const storebyte = defword(&substore, Flag.ZERO, "C!", wrap(_storebyte));
-
-inline fn _fetchbyte(sp: [*]isize) [*]isize {
-    const p: [*]u8 = @ptrFromInt(@abs(sp[0]));
-    sp[0] = p[0];
-    return sp;
-}
-const fetchbyte = defword(&storebyte, Flag.ZERO, "C@", wrap(_fetchbyte));
-
-inline fn _ccopy(sp: [*]isize) [*]isize {
-    const p: [*]u8 = @ptrFromInt(@abs(sp[0]));
-    const q: [*]u8 = @ptrFromInt(@abs(sp[1]));
-    q[0] = p[0];
-    return sp[2..];
-}
-const ccopy = defword(&fetchbyte, Flag.ZERO, "C@C!", wrap(_ccopy));
-
-inline fn _cmove(sp: [*]isize) [*]isize {
-    const n = @abs(sp[0]);
-    @memcpy(dest: {
-        const p: [*]u8 = @ptrFromInt(@abs(sp[1]));
-        break :dest p[0..n];
-    }, source: {
-        const q: [*]u8 = @ptrFromInt(@abs(sp[2]));
-        break :source q[0..n];
-    });
-    sp[2] = sp[1];
-    return sp[2..];
-}
-const cmove = defword(&ccopy, Flag.ZERO, "CMOVE", wrap(_cmove));
-const state = defword(&cmove, Flag.ZERO, "STATE", attr("state"));
-
-fn _here(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    self.memory.ensureUnusedCapacity(@sizeOf(Instr)) catch @panic("_here cannot ensureUnusedCapacity");
-    s[0] = @intCast(@intFromPtr(&self.here));
-    self.next(s, rsp, ip, target);
-}
-const here = defword(&state, Flag.ZERO, "HERE", &.{.{ .code = _here }});
-const latest = defword(&here, Flag.ZERO, "LATEST", attr("latest"));
-const sz = defword(&latest, Flag.ZERO, "S0", attr("s0"));
-const base = defword(&sz, Flag.ZERO, "BASE", attr("base"));
-
-inline fn _argc(sp: [*]isize) [*]isize {
-    const s = sp - 1;
-    const u = @intFromPtr(os.argv.ptr - 1);
-    s[0] = @intCast(u);
-    return s;
-}
-const argc = defword(&base, Flag.ZERO, "(ARGC)", wrap(_argc));
-const version = defword(&if (arch.isWasm()) base else argc, Flag.ZERO, "VERSION", value(47));
-
-fn _rz(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    const u = @intFromPtr(self.r0);
-    s[0] = @intCast(u);
-    self.next(s, rsp, ip, target);
-}
-const rz = defword(&version, Flag.ZERO, "R0", &.{.{ .code = _rz }});
-
-fn docol_(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const r = rsp - 1;
-    r[0] = ip;
-    self.next(sp, r, target[1..], target);
+    self.next(sp, rsp + 4, @abs(self.readInt(rsp)), target);
 }
 
-inline fn _docol(sp: [*]isize) [*]isize {
-    const s = sp - 1;
-    s[0] = @intCast(@intFromPtr(&docol_));
-    return s;
-}
-const docol = defword(&rz, Flag.ZERO, "DOCOL", wrap(_docol));
-
-fn dodoes_(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const r = rsp - 1;
-    const s = sp - 1;
-    r[0] = ip;
-    s[0] = @intCast(@intFromPtr(&target[2]));
-    self.next(s, r, target[1].word, target);
+fn _lit(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(sp - 4, self.readInt(ip));
+    self.next(sp - 4, rsp, ip + 4, target);
 }
 
-inline fn _dodoes(sp: [*]isize) [*]isize {
-    const s = sp - 1;
-    s[0] = @intCast(@intFromPtr(&dodoes_));
-    return s;
+fn _store(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(@abs(self.readInt(sp)), self.readInt(sp + 4));
+    self.next(sp + 8, rsp, ip, target);
 }
-const dodoes = defword(&docol, Flag.ZERO, "DODOES", wrap(_dodoes));
-const f_immed = defword(&dodoes, Flag.ZERO, "F_IMMED", value(@intFromEnum(Flag.IMMED)));
-const f_hidden = defword(&f_immed, Flag.ZERO, "F_HIDDEN", value(@intFromEnum(Flag.HIDDEN)));
-const f_lenmask = defword(&f_hidden, Flag.ZERO, "F_LENMASK", value(F_LENMASK));
-const sys_exit = defword(&f_lenmask, Flag.ZERO, "SYS_EXIT", value(@intFromEnum(syscalls.X64.exit)));
-const sys_open = defword(&sys_exit, Flag.ZERO, "SYS_OPEN", value(@intFromEnum(syscalls.X64.open)));
-const sys_close = defword(&sys_open, Flag.ZERO, "SYS_CLOSE", value(@intFromEnum(syscalls.X64.close)));
-const sys_read = defword(&sys_close, Flag.ZERO, "SYS_READ", value(@intFromEnum(syscalls.X64.read)));
-const sys_write = defword(&sys_read, Flag.ZERO, "SYS_WRITE", value(@intFromEnum(syscalls.X64.write)));
-const sys_creat = defword(&sys_write, Flag.ZERO, "SYS_CREAT", value(@intFromEnum(syscalls.X64.creat)));
-const sys_brk = defword(&sys_creat, Flag.ZERO, "SYS_BRK", value(@intFromEnum(syscalls.X64.brk)));
-const o_rdonly = defword(&sys_brk, Flag.ZERO, "O_RDONLY", value(O_RDONLY));
-const o_wronly = defword(&o_rdonly, Flag.ZERO, "O_WRONLY", value(O_WRONLY));
-const o_rdwr = defword(&o_wronly, Flag.ZERO, "O_RDWR", value(O_RDWR));
-const o_creat = defword(&o_rdwr, Flag.ZERO, "O_CREAT", value(O_CREAT));
-const o_excl = defword(&o_creat, Flag.ZERO, "O_EXCL", value(O_EXCL));
-const o_trunc = defword(&o_excl, Flag.ZERO, "O_TRUNC", value(O_TRUNC));
-const o_append = defword(&o_trunc, Flag.ZERO, "O_APPEND", value(O_APPEND));
-const o_nonblock = defword(&o_append, Flag.ZERO, "O_NONBLOCK", value(O_NONBLOCK));
 
-fn _tor(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const r = rsp - 1;
-    const t: [*]Instr = @ptrFromInt(@abs(sp[0]));
-    r[0] = t;
-    self.next(sp[1..], r, ip, target);
+fn _fetch(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(sp, self.readInt(@abs(self.readInt(sp))));
+    self.next(sp, rsp, ip, target);
 }
-const tor = defword(&o_nonblock, Flag.ZERO, ">R", &.{.{ .code = _tor }});
 
-fn _fromr(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    s[0] = @intCast(@intFromPtr(rsp[0]));
-    self.next(s, rsp[1..], ip, target);
+fn _addstore(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const p = @abs(self.readInt(sp));
+    self.writeInt(p, self.readInt(p) + self.readInt(sp + 4));
+    self.next(sp + 8, rsp, ip, target);
 }
-const fromr = defword(&tor, Flag.ZERO, "R>", &.{.{ .code = _fromr }});
 
-fn _rspfetch(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    s[0] = @intCast(@intFromPtr(rsp));
-    self.next(s, rsp, ip, target);
+fn _substore(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const p = @abs(self.readInt(sp));
+    self.writeInt(p, self.readInt(p) - self.readInt(sp + 4));
+    self.next(sp + 8, rsp, ip, target);
 }
-const rspfetch = defword(&fromr, Flag.ZERO, "RSP@", &.{.{ .code = _rspfetch }});
 
-fn _rspstore(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
+fn _storebyte(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const p = @abs(self.readInt(sp));
+    const q = @abs(self.readInt(sp + 4));
+    self.memory.items.ptr[p] = @truncate(q);
+    self.next(sp + 8, rsp, ip, target);
+}
+
+fn _fetchbyte(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const p = @abs(self.readInt(sp));
+    self.writeInt(sp, self.memory.items[p]);
+    self.next(sp, rsp, ip, target);
+}
+
+fn _ccopy(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const p = @abs(self.readInt(sp));
+    const q = @abs(self.readInt(sp + 4));
+
+    const memory = self.memory.items.ptr;
+    memory[q] = memory[p];
+    self.next(sp + 8, rsp, ip, target);
+}
+
+fn _cmove(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const n = @abs(self.readInt(sp));
+    const p = @abs(self.readInt(sp + 4));
+    const q = @abs(self.readInt(sp + 8));
+    @memcpy(self.slice(p, n), self.slice(q, n));
+    self.writeInt(sp + 8, @intCast(p));
+    self.next(sp + 8, rsp, ip, target);
+}
+
+fn _here(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.memory.ensureUnusedCapacity(@sizeOf(Address)) catch @panic("_here cannot ensureUnusedCapacity");
+    self.writeInt(sp - 4, @offsetOf(Header, "here"));
+    self.next(sp - 4, rsp, ip, target);
+}
+
+fn _argc(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.next(sp, rsp, ip, target);
+}
+
+fn docol(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(rsp - 4, @intCast(ip));
+    self.next(sp, rsp - 4, target + 4, target);
+}
+
+fn _tor(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(rsp - 4, self.readInt(sp));
+    self.next(sp + 4, rsp - 4, ip, target);
+}
+
+fn _fromr(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(sp - 4, self.readInt(rsp));
+    self.next(sp - 4, rsp + 4, ip, target);
+}
+
+fn _rspfetch(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(sp - 4, @intCast(rsp));
+    self.next(sp - 4, rsp, ip, target);
+}
+
+fn _rspstore(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     _ = rsp;
-    const s = @abs(sp[0]);
-    const t: [*][*]const Instr = @ptrFromInt(s);
-    self.next(sp[1..], t, ip, target);
+    self.next(sp + 4, @abs(self.readInt(sp)), ip, target);
 }
-const rspstore = defword(&rspfetch, Flag.ZERO, "RSP!", &.{.{ .code = _rspstore }});
 
-fn _rdrop(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    self.next(sp, rsp[1..], ip, target);
+fn _rdrop(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.next(sp, rsp + 4, ip, target);
 }
-const rdrop = defword(&rspstore, Flag.ZERO, "RDROP", &.{.{ .code = _rdrop }});
 
-inline fn _dspfetch(sp: [*]isize) [*]isize {
-    const s = sp - 1;
-    s[0] = @intCast(@intFromPtr(sp));
-    return s;
+fn _dspfetch(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(sp - 4, @intCast(sp));
+    self.next(sp - 4, rsp, ip, target);
 }
-const dspfetch = defword(&rdrop, Flag.ZERO, "DSP@", wrap(_dspfetch));
 
-inline fn _dspstore(sp: [*]isize) [*]isize {
-    const u = @abs(sp[0]);
-    const p: [*]isize = @ptrFromInt(u);
-    return p;
+fn _dspstore(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.next(@abs(self.readInt(sp)), rsp, ip, target);
 }
-const dspstore = defword(&dspfetch, Flag.ZERO, "DSP!", wrap(_dspstore));
 
-fn _key(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    s[0] = @intCast(self.key() catch std.process.exit(0));
-    self.next(s, rsp, ip, target);
+fn _key(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(sp - 4, self.key() catch std.process.exit(0));
+    self.next(sp - 4, rsp, ip, target);
 }
-const key_ = defword(&dspstore, Flag.ZERO, "KEY", &.{.{ .code = _key }});
 
-fn _emit(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const c: u8 = @truncate(@abs(sp[0]));
+fn _emit(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const c: u8 = @truncate(@abs(self.readInt(sp)));
     self.writer.print("{c}", .{c}) catch {};
     self.writer.flush() catch {};
-    self.next(sp[1..], rsp, ip, target);
+    self.next(sp + 4, rsp, ip, target);
 }
-const emit = defword(&key_, Flag.ZERO, "EMIT", &.{.{ .code = _emit }});
 
-fn _word(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 2;
-    const u = @intFromPtr(&self.buffer);
-    s[1] = @intCast(u);
-    s[0] = @intCast(self.word() catch std.process.exit(0));
-    self.next(s, rsp, ip, target);
+fn _word(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const word = self.word() catch std.process.exit(0);
+    self.writeInt(sp - 4, @offsetOf(Header, "buffer"));
+    self.writeInt(sp - 8, @intCast(word.len));
+    self.next(sp - 8, rsp, ip, target);
 }
-const word_ = defword(&emit, Flag.ZERO, "WORD", &.{.{ .code = _word }});
 
-fn _number(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    if (fmt.parseInt(isize, buf: {
-        const s: [*]u8 = @ptrFromInt(@abs(sp[1]));
-        break :buf s[0..@abs(sp[0])];
-    }, @truncate(@abs(self.base)))) |num| {
-        sp[1] = num;
-        sp[0] = 0;
+fn _number(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    if (fmt.parseInt(i32, self.slice(@abs(self.readInt(sp + 4)), @abs(self.readInt(sp))), @truncate(@abs(self.readInt(@offsetOf(Header, "base")))))) |num| {
+        self.writeInt(sp, 0);
+        self.writeInt(sp + 4, num);
     } else |_| {}
     self.next(sp, rsp, ip, target);
 }
-const number = defword(&word_, Flag.ZERO, "NUMBER", &.{.{ .code = _number }});
 
-fn _find(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s: [*]u8 = @ptrFromInt(@abs(sp[1]));
-    const v = self.find(s[0..@abs(sp[0])]);
+fn _find(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const v = self.find(self.slice(@abs(self.readInt(sp + 4)), @abs(self.readInt(sp))));
 
-    sp[1] = @intCast(@intFromPtr(v));
-    self.next(sp[1..], rsp, ip, target);
+    self.writeInt(sp + 4, @intCast(if (v) |ptr| @intFromPtr(ptr) - @intFromPtr(self.memory.items.ptr) else 0));
+    self.next(sp + 4, rsp, ip, target);
 }
-const find_ = defword(&number, Flag.ZERO, "FIND", &.{.{ .code = _find }});
 
-inline fn _tcfa(sp: [*]isize) [*]isize {
-    const w: [*]const Instr = @ptrFromInt(@abs(sp[0]));
-    sp[0] = @intCast(@intFromPtr(codeFieldAddress(w)));
+inline fn _tcfa(sp: [*]i32) [*]i32 {
+    const w: Address = @enumFromInt(@abs(sp[0]));
+    sp[0] = @intCast(codeFieldAddress(w));
     return sp;
 }
-const tcfa = defword(&find_, Flag.ZERO, ">CFA", wrap(_tcfa));
-const tdfa = defword(
-    &tcfa,
-    Flag.ZERO,
-    ">DFA",
-    words(&.{ &tcfa, &incrp, &exit, &exit }),
-);
 
-fn _create(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const c = @abs(sp[0]);
-    const s: [*]u8 = @ptrFromInt(@abs(sp[1]));
-    const code = self.memory.addManyAsSlice(@sizeOf(Word)) catch @panic("_create cannot addManyAsSlice");
-    var new: *Word = @ptrCast(@alignCast(code.ptr));
-    new.link = self.latest;
-    new.flag = @truncate(c);
-    @memcpy(new.name[0..c], s[0..c]);
-    @memset(new.name[c..F_LENMASK], 0);
-    self.latest = new;
-    self.here = self.memory.items.ptr + self.memory.items.len;
-    self.next(sp[2..], rsp, ip, target);
+fn _create(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const name = self.slice(@abs(self.readInt(sp + 4)), @abs(self.readInt(sp)));
+    var word: Word.Data = .{
+        .link = @enumFromInt(self.readInt(@offsetOf(Header, "latest"))),
+        .flag = @truncate(name.len),
+        .name = @splat(0),
+        .code = undefined,
+    };
+    @memcpy(word.name[0..name.len], name);
+    self.writeInt(@offsetOf(Header, "latest"), @intCast(self.memory.items.len));
+    self.memory.appendSlice(mem.asBytes(&word)) catch @panic("_create cannot appendSlice");
+    self.memory.items.len -= 4; // .code is undefined
+    self.writeInt(@offsetOf(Header, "here"), @intCast(self.memory.items.len));
+    self.next(sp + 8, rsp, ip, target);
 }
-const create = defword(&tdfa, Flag.ZERO, "CREATE", &.{.{ .code = _create }});
 
-fn _comma(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s: isize = sp[0];
-    const instr: Instr = if (s < 0x1000)
-        .{ .literal = s }
-    else if (s == @intFromPtr(&docol_))
-        .{ .code = docol_ }
-    else
-        .{ .word = blk: {
-            const p: [*]const Instr = @ptrFromInt(@abs(s));
-            break :blk p;
-        } };
-    self.append(instr);
-    self.next(sp[1..], rsp, ip, target);
+fn _comma(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.append(.{ .literal = self.readInt(sp) });
+    self.next(sp + 4, rsp, ip, target);
 }
-const comma = defword(&create, Flag.ZERO, ",", &.{.{ .code = _comma }});
 
-fn _lbrac(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    self.state = 0;
+fn _lbrac(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(@offsetOf(Header, "state"), 0);
     self.next(sp, rsp, ip, target);
 }
-const lbrac = defword(
-    &comma,
-    Flag.IMMED,
-    "[",
-    &.{.{ .code = _lbrac }},
-);
 
-fn _rbrac(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    self.state = 1;
+fn _rbrac(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(@offsetOf(Header, "state"), 1);
     self.next(sp, rsp, ip, target);
 }
-const rbrac = defword(&lbrac, Flag.ZERO, "]", &.{.{ .code = _rbrac }});
 
-fn _immediate(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    self.latest.flag ^= @intFromEnum(Flag.IMMED);
+fn _immediate(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const w: *Word.Data = @ptrCast(@alignCast(self.slice(@abs(self.readInt(@offsetOf(Header, "latest"))), @sizeOf(Word.Data))));
+    w.flag ^= @intFromEnum(Flag.IMMED);
     self.next(sp, rsp, ip, target);
 }
-const immediate = defword(
-    &rbrac,
-    Flag.IMMED,
-    "IMMEDIATE",
-    &.{.{ .code = _immediate }},
-);
 
-inline fn _hidden(sp: [*]isize) [*]isize {
-    const w: *Word = @ptrFromInt(@abs(sp[0]));
+fn _hidden(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const w: *Word.Data = @ptrCast(@alignCast(self.slice(@abs(self.readInt(sp)), @sizeOf(Word.Data))));
     w.flag ^= @intFromEnum(Flag.HIDDEN);
-    return sp[1..];
+    self.next(sp + 4, rsp, ip, target);
 }
-const hidden = defword(&immediate, Flag.ZERO, "HIDDEN", wrap(_hidden));
-const hide = defword(
-    &hidden,
-    Flag.ZERO,
-    "HIDE",
-    words(&.{ &word_, &find_, &hidden, &exit }),
-);
-const colon = defword(
-    &hide,
-    Flag.ZERO,
-    ":",
-    words(&.{ &word_, &create, &docol, &comma, &latest, &fetch, &hidden, &rbrac, &exit, &exit }),
-);
 
-fn _tick(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    const u = @intFromPtr(ip[0].word);
-    s[0] = @intCast(u);
-    self.next(s, rsp, ip[1..], target);
+fn _tick(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.writeInt(sp - 4, self.readInt(ip));
+    self.next(sp - 4, rsp, ip + 4, target);
 }
-const tick = defword(&colon, Flag.ZERO, "'", &.{.{ .code = _tick }});
-const semicolon = defword(
-    &tick,
-    Flag.IMMED,
-    ";",
-    words(&.{ &tick, &exit, &comma, &latest, &fetch, &hidden, &lbrac, &exit }),
-);
 
-fn _branch(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const n = @divTrunc(ip[0].literal, @sizeOf(Instr));
+fn _branch(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const n = self.readInt(ip);
     const a = @abs(n);
     const p = if (n < 0) ip - a else ip + a;
     self.next(sp, rsp, p, target);
 }
-const branch = defword(&semicolon, Flag.ZERO, "BRANCH", &.{.{ .code = _branch }});
 
-fn _zbranch(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    if (sp[0] == 0)
-        return @call(.always_tail, _branch, .{ self, sp[1..], rsp, ip, target });
-    self.next(sp[1..], rsp, ip[1..], target);
+fn _zbranch(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    if (self.readInt(sp) == 0)
+        return @call(.always_tail, _branch, .{ self, sp + 4, rsp, ip, target });
+    self.next(sp + 4, rsp, ip + 4, target);
 }
-const zbranch = defword(&branch, Flag.ZERO, "0BRANCH", &.{.{ .code = _zbranch }});
 
-fn _litstring(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const c = @abs(ip[0].literal);
-    const s = sp - 2;
-    s[1] = @intCast(@intFromPtr(&ip[1]));
-    s[0] = @intCast(c);
-    const n = @abs(1 + @divTrunc(c + @sizeOf(Instr), @sizeOf(Instr)));
-    self.next(s, rsp, ip[n..], target);
+fn _litstring(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const c = self.readInt(ip);
+    self.writeInt(sp - 4, @intCast(ip + 4));
+    self.writeInt(sp - 8, c);
+    self.next(sp - 8, rsp, (ip + @abs(c) + 7) & ~@as(usize, 3), target);
 }
-const litstring = defword(&zbranch, Flag.ZERO, "LITSTRING", &.{.{ .code = _litstring }});
 
-fn _tell(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const p: [*]u8 = @ptrFromInt(@abs(sp[1]));
-    _ = self.writer.write(p[0..@abs(sp[0])]) catch -1;
+fn _tell(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const n = @abs(self.readInt(sp));
+    const p = @abs(self.readInt(sp + 4));
+    _ = self.writer.write(self.slice(p, n)) catch -1;
     self.writer.flush() catch {};
-    self.next(sp[2..], rsp, ip, target);
+    self.next(sp + 8, rsp, ip, target);
 }
-const tell = defword(&litstring, Flag.ZERO, "TELL", &.{.{ .code = _tell }});
 
-fn _interpret(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const c = self.word() catch return;
+fn _interpret(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const word = self.word() catch return;
     var s = sp;
 
-    if (self.find(self.buffer[0..c])) |new| {
-        const tgt = codeFieldAddress(@ptrCast(new));
-        if ((new.flag & @intFromEnum(Flag.IMMED)) != 0 or self.state == 0) {
-            return @call(.always_tail, tgt[0].code, .{ self, sp, rsp, ip, tgt });
+    if (self.find(word)) |new| {
+        const tgt = @intFromPtr(&new.code) - @intFromPtr(self.memory.items.ptr);
+        if ((new.flag & @intFromEnum(Flag.IMMED)) != 0 or self.readInt(@offsetOf(Header, "state")) == 0) {
+            return @call(.always_tail, primitives[@intFromEnum(new.code)], .{ self, sp, rsp, ip, tgt });
         } else {
-            self.append(.{ .word = tgt });
+            self.append(.{ .word = @enumFromInt(tgt) });
         }
-    } else if (fmt.parseInt(isize, self.buffer[0..c], @truncate(@abs(self.base)))) |a| {
-        if (self.state == 1) {
-            self.append(.{ .word = &.{.{ .code = _lit }} });
+    } else if (fmt.parseInt(i32, word, @intCast(self.readInt(@offsetOf(Header, "base"))))) |a| {
+        if (self.readInt(@offsetOf(Header, "state")) == 1) {
+            self.append(.{ .word = .LIT });
             self.append(.{ .literal = a });
         } else {
-            s = sp - 1;
-            s[0] = a;
+            s = sp - 4;
+            self.writeInt(s, a);
         }
     } else |_| {
-        if (c == 1 and self.buffer[0] == std.ascii.control_code.del)
+        if (word.len == 1 and word[0] == std.ascii.control_code.del)
             return;
-        std.debug.print("PARSE ERROR: {s}\n", .{self.buffer[0..c]});
+        std.debug.print("PARSE ERROR: {s}\n", .{word});
         std.process.exit(0);
     }
     self.next(s, rsp, ip, target);
 }
-const interpret = defword(&tell, Flag.ZERO, "INTERPRET", &.{.{ .code = _interpret }});
-const _quit: [7]Instr = .{
-    .{ .code = docol_ },
-    .{ .word = codeFieldAddress(&rz) },
-    .{ .word = codeFieldAddress(&rspstore) },
-    .{ .word = codeFieldAddress(&interpret) },
-    .{ .word = codeFieldAddress(&branch) },
-    .{ .literal = -2 * @sizeOf(Instr) },
-    .{ .word = codeFieldAddress(&exit) },
-};
-const quit = defword(&interpret, Flag.ZERO, "QUIT", &_quit);
 
-fn _char(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const s = sp - 1;
-    _ = self.word() catch std.process.exit(0);
-    s[0] = self.buffer[0];
-    self.next(s, rsp, ip, target);
+fn _char(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const buf = self.word() catch std.process.exit(0);
+    self.writeInt(sp - 4, buf[0]);
+    self.next(sp - 4, rsp, ip, target);
 }
-const char = defword(&quit, Flag.ZERO, "CHAR", &.{.{ .code = _char }});
 
-fn _execute(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
+fn _execute(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     _ = target;
-    const target_: *Instr = @ptrFromInt(@abs(sp[0]));
-    return @call(.always_tail, target_.code, .{ self, sp[1..], rsp, ip, target_[0..0] });
+    const target_ = @abs(self.readInt(sp));
+    const code = @abs(self.readInt(target_));
+    return @call(.always_tail, primitives[code], .{ self, sp + 4, rsp, ip, target_ });
 }
-const execute = defword(&char, Flag.ZERO, "EXECUTE", &.{.{ .code = _execute }});
 
-inline fn _syscall3(sp: [*]isize) [*]isize {
+inline fn _syscall3(sp: [*]i32) [*]i32 {
     const number_: syscalls.X64 = @enumFromInt(sp[0]);
 
     switch (number_) {
         .open => {
-            const p: usize = @intCast(sp[1]);
+            const p: usize = @abs(sp[1]);
             const file_path: [*:0]u8 = @ptrFromInt(p);
-            const flags: u32 = @intCast(sp[2]);
-            const perm: fs.File.Mode = @intCast(sp[3]);
-            sp[3] = if (fs.cwd().createFileZ(file_path, .{
-                .read = (flags & (O_RDONLY | O_RDWR)) != 0,
-                .truncate = (flags & O_TRUNC) != 0,
-                .exclusive = (flags & O_EXCL) != 0,
-                .lock_nonblocking = (flags & O_NONBLOCK) != 0,
-                .mode = perm,
-            })) |file| @intCast(file.handle) else |_| -1;
+            const mode: std.c.mode_t = @abs(sp[3]);
+            sp[3] = std.c.openat(std.c.AT.FDCWD, file_path, openFlags(@abs(sp[2])), mode);
         },
         .read => {
-            const file: fs.File = .{ .handle = @intCast(sp[1]) };
-            const p: usize = @intCast(sp[2]);
+            const fd: std.c.fd_t = @intCast(sp[1]);
+            const p: usize = @abs(sp[2]);
             const buf: [*]u8 = @ptrFromInt(p);
             const n: usize = @intCast(sp[3]);
-            sp[3] = if (file.read(buf[0..n])) |m| @intCast(m) else |_| -1;
+            sp[3] = @intCast(std.c.read(fd, buf, n));
         },
         .write => {
-            const file: fs.File = .{ .handle = @intCast(sp[1]) };
-            const p: usize = @intCast(sp[2]);
+            const fd: std.c.fd_t = @intCast(sp[1]);
+            const p: usize = @abs(sp[2]);
             const buf: [*]u8 = @ptrFromInt(p);
             const n: usize = @intCast(sp[3]);
-            sp[3] = if (file.write(buf[0..n])) |m| @intCast(m) else |_| -1;
+            sp[3] = @intCast(std.c.write(fd, buf, n));
         },
         else => {},
     }
     return sp[3..];
 }
-const syscall3 = defword(&execute, Flag.ZERO, "SYSCALL3", wrap(_syscall3));
 
-inline fn _syscall2(sp: [*]isize) [*]isize {
+inline fn _syscall2(sp: [*]i32) [*]i32 {
     const number_: syscalls.X64 = @enumFromInt(sp[0]);
 
     switch (number_) {
         .open => {
-            const p: usize = @intCast(sp[1]);
+            const p: usize = @abs(sp[1]);
             const file_path: [*:0]u8 = @ptrFromInt(p);
-            const flags: u32 = @intCast(sp[2]);
-            sp[2] = if (fs.cwd().openFileZ(file_path, .{
-                .mode = @enumFromInt(flags & (O_RDONLY | O_WRONLY | O_RDWR)),
-                .lock_nonblocking = (flags & O_NONBLOCK) != 0,
-            })) |file| @intCast(file.handle) else |_| -1;
+            sp[2] = std.c.openat(std.c.AT.FDCWD, file_path, openFlags(@abs(sp[2])));
         },
         else => {},
     }
     return sp[2..];
 }
-const syscall2 = defword(&syscall3, Flag.ZERO, "SYSCALL2", wrap(_syscall2));
 
-fn _syscall1(self: *Interp, sp: [*]isize, rsp: [*][*]const Instr, ip: [*]const Instr, target: [*]const Instr) callconv(conv) void {
-    const number_: syscalls.X64 = @enumFromInt(sp[0]);
+fn _syscall1(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    const number_: syscalls.X64 = @enumFromInt(self.readInt(sp));
 
     switch (number_) {
         .exit => {
-            const status: u8 = @truncate(@abs(sp[1]));
+            const status: u8 = @truncate(@abs(self.readInt(sp + 4)));
             std.process.exit(status);
         },
         .close => {
-            const file: fs.File = .{ .handle = @intCast(sp[1]) };
-            file.close();
+            const file: std.c.fd_t = @intCast(self.readInt(sp + 4));
+            self.writeInt(sp + 4, std.c.close(file));
         },
         .brk => {
-            const m = @abs(sp[1]);
-            const p: *std.heap.FixedBufferAllocator = @ptrCast(@alignCast(self.memory.allocator.ptr));
-            if (m > 0) {
-                const n = if (arch.isWasm())
-                    @wasmMemoryGrow(0, @divTrunc(m, 0x10000))
-                else
-                    os.linux.syscall1(.brk, m);
-                if (n < m)
-                    @panic("brk syscall failed");
-                p.buffer.len = m - @intFromPtr(p.buffer.ptr);
-            }
-            sp[1] = @intCast(@intFromPtr(p.buffer.ptr + p.buffer.len));
+            const m = self.memory.capacity;
+            const n = @abs(self.readInt(sp + 4));
+            self.memory.ensureTotalCapacityPrecise(m + n) catch @panic("_syscall1 cannot ensureTotalCapacityPrecise");
+            self.writeInt(sp + 4, @intCast(m));
         },
         else => {},
     }
-    self.next(sp[1..], rsp, ip, target);
+    self.next(sp + 4, rsp, ip, target);
 }
-const syscall1 = defword(&syscall2, Flag.ZERO, "SYSCALL1", &.{.{ .code = _syscall1 }});
 
-inline fn _syscall0(sp: [*]isize) [*]isize {
+inline fn _syscall0(sp: [*]i32) [*]i32 {
     const number_: syscalls.X64 = @enumFromInt(sp[0]);
     switch (number_) {
         .getppid => {
@@ -980,59 +858,264 @@ inline fn _syscall0(sp: [*]isize) [*]isize {
     }
     return sp;
 }
-var syscall0 = defword(&syscall1, Flag.ZERO, "SYSCALL0", wrap(_syscall0));
 
-var memory: [0x800000]u8 linksection(".bss") = undefined;
+const primitives = [_]*const Code{
+    docol,
+    wrap(_drop),
+    wrap(_swap),
+    wrap(_dup),
+    wrap(_over),
+    wrap(_rot),
+    wrap(_nrot),
+    wrap(_twodrop),
+    wrap(_twodup),
+    wrap(_twoswap),
+    wrap(_qdup),
+    wrap(_incr),
+    wrap(_decr),
+    wrap(_incrp),
+    wrap(_decrp),
+    wrap(_add),
+    wrap(_sub),
+    wrap(_mul),
+    wrap(_divmod),
+    wrap(_equ),
+    wrap(_nequ),
+    wrap(_lt),
+    wrap(_gt),
+    wrap(_le),
+    wrap(_ge),
+    wrap(_zequ),
+    wrap(_znequ),
+    wrap(_zlt),
+    wrap(_zgt),
+    wrap(_zle),
+    wrap(_zge),
+    wrap(_and),
+    wrap(_or),
+    wrap(_xor),
+    wrap(_invert),
+    _exit,
+    _lit,
+    _store,
+    _fetch,
+    _addstore,
+    _substore,
+    _storebyte,
+    _fetchbyte,
+    _ccopy,
+    _cmove,
+    value(@offsetOf(Header, "state")),
+    value(@offsetOf(Header, "here")),
+    value(@offsetOf(Header, "latest")),
+    value(@offsetOf(Header, "s0")),
+    value(@offsetOf(Header, "base")),
+    _argc,
+    value(47),
+    value(0x4_000),
+    value(0),
+    value(@intFromEnum(Flag.IMMED)),
+    value(@intFromEnum(Flag.HIDDEN)),
+    value(F_LENMASK),
+    value(@intFromEnum(syscalls.X64.exit)),
+    value(@intFromEnum(syscalls.X64.open)),
+    value(@intFromEnum(syscalls.X64.close)),
+    value(@intFromEnum(syscalls.X64.read)),
+    value(@intFromEnum(syscalls.X64.write)),
+    value(@intFromEnum(syscalls.X64.creat)),
+    value(@intFromEnum(syscalls.X64.brk)),
+    value(O_RDONLY),
+    value(O_WRONLY),
+    value(O_RDWR),
+    value(O_CREAT),
+    value(O_EXCL),
+    value(O_TRUNC),
+    value(O_APPEND),
+    value(O_NONBLOCK),
+    _tor,
+    _fromr,
+    _rspfetch,
+    _rspstore,
+    _rdrop,
+    _dspfetch,
+    _dspstore,
+    _key,
+    _emit,
+    _word,
+    _number,
+    _find,
+    wrap(_tcfa),
+    _create,
+    _comma,
+    _lbrac,
+    _rbrac,
+    _immediate,
+    _hidden,
+    _tick,
+    _branch,
+    _zbranch,
+    _litstring,
+    _tell,
+    _interpret,
+    _char,
+    _execute,
+    wrap(_syscall3),
+    wrap(_syscall2),
+    _syscall1,
+    wrap(_syscall0),
+};
 
-fn run(reader: *std.Io.Reader, writer: *std.Io.Writer) void {
-    const N = 0x20;
-    var stack: [N]isize = undefined;
-    const sp = stack[N..];
-    var return_stack: [N][*]const Instr = undefined;
-    const rsp = return_stack[N..];
-    var fba: std.heap.FixedBufferAllocator = .init(&memory);
-    var m: std.array_list.AlignedManaged(u8, .of(Instr)) = .init(fba.allocator());
-    defer m.deinit();
-    var env: Interp = .init(reader, writer, sp, rsp, &m);
-    const target = &_quit;
-    const cold_start: [1]Instr = .{.{ .word = target }};
-    const ip: [*]const Instr = &cold_start;
+const numBytes = @sizeOf(Header) + @sizeOf(Word.Data) * 107 + 30 * @sizeOf(Address.Data);
+fn defwords() [numBytes]u8 {
+    @setEvalBranchQuota(5_000);
+    var latest: u32 = 0;
+    var buffer: [numBytes]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    writer.advance(@sizeOf(Header));
+    for (0..107) |i| {
+        const code: Word = @enumFromInt(switch (i) {
+            0...83 => i + 1, // skip DOCOL
+            85...90 => i, // >DFA is composite
+            94...99 => i - 3, // : ; and HIDE are composite
+            101...106 => i - 4, // QUIT is composite
+            else => 0,
+        });
+        const name = switch (i) {
+            84 => ">DFA",
+            91 => ":",
+            92 => ";",
+            93 => "HIDE",
+            100 => "QUIT",
+            else => @tagName(code),
+        };
+        var word: Word.Data = .{
+            .link = @enumFromInt(latest),
+            .flag = @truncate(name.len | switch (i) {
+                87, 89, 92 => @intFromEnum(Flag.IMMED),
+                else => 0,
+            }),
+            .name = @splat(0),
+            .code = code,
+        };
+        @memcpy(word.name[0..name.len], name);
+        latest = @truncate(writer.end);
+        writer.writeStruct(word, arch.endian()) catch @panic("defwords cannot write word");
 
-    target[0].code(&env, sp, rsp, ip, target);
+        var it = mem.tokenizeScalar(u8, switch (i) {
+            84 => ">CFA 4+ EXIT",
+            91 => "WORD CREATE LIT 0 , LATEST @ HIDDEN ] EXIT",
+            92 => "LIT EXIT , LATEST @ HIDDEN [ EXIT",
+            93 => "WORD FIND HIDDEN EXIT",
+            100 => "R0 RSP! INTERPRET BRANCH -8",
+            else => "",
+        }, ' ');
+
+        while (it.next()) |item| {
+            if (fmt.parseInt(i32, item, 10)) |num| {
+                try writer.writeInt(i32, num, arch.endian());
+            } else |_| {
+                var node = latest;
+                while (buffer[node + 4] & F_LENMASK != item.len or !mem.eql(u8, buffer[node + 5 ..][0..item.len], item))
+                    node = mem.readInt(u32, buffer[node..][0..4], arch.endian());
+                writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), arch.endian()) catch @panic("defwords cannot write node");
+            }
+        }
+    }
+    std.debug.assert(writer.end == numBytes);
+
+    var quit = latest;
+    while (buffer[quit + 4] != 4 or !mem.eql(u8, buffer[quit + 5 ..][0..4], "QUIT"))
+        quit = mem.readInt(u32, buffer[quit..][0..4], arch.endian());
+
+    const header: Header = .{
+        .stack = @splat(0),
+        .return_stack = @splat(0),
+        .input_buffer = @splat(0),
+        .output_buffer = @splat(0),
+        .state = 0,
+        .here = numBytes,
+        .latest = latest,
+        .s0 = 0x2_000,
+        .base = 10,
+        .buffer = @splat(0),
+        .cold_start = .{quit + @offsetOf(Word.Data, "code")},
+    };
+    writer.undo(numBytes); // rewind to start
+    writer.writeStruct(header, arch.endian()) catch @panic("defwords cannot write header");
+    return buffer;
 }
 
-pub fn main() callconv(conv) void {
-    var stdin_buffer: [2048]u8 = undefined;
-    var stdin_reader = fs.File.stdin().reader(&stdin_buffer);
-    var stdout_buffer: [2048]u8 = undefined;
-    var stdout_writer = fs.File.stdout().writer(&stdout_buffer);
+const initial: [numBytes]u8 align(4) = defwords();
 
-    run(&stdin_reader.interface, &stdout_writer.interface);
+test "defwords" {
+    const start = @sizeOf(Header);
+    const words: [*]const Word.Data = @ptrCast(initial[start..]);
+    try testing.expectEqual(.sentinel, words[0].link);
+    try testing.expectEqualSlices(u8, "DROP", words[0].name[0..words[0].flag]);
+    try testing.expectEqual(.DROP, words[0].code);
+    try testing.expectEqual(@as(Address, @enumFromInt(start)), words[1].link);
+    try testing.expectEqualSlices(u8, "SWAP", words[1].name[0..words[1].flag]);
+    try testing.expectEqual(.LIT, words[35].code);
+    try testing.expectEqual(.R0, words[51].code);
+    try testing.expectEqualSlices(u8, "DOCOL", words[52].name[0..words[52].flag]);
+    try testing.expectEqual(.@">CFA", words[83].code);
+    try testing.expectEqualSlices(u8, ">DFA", words[84].name[0..words[84].flag]);
+    try testing.expectEqual(0, @intFromEnum(words[84].code));
+    // This is a kludge.  >DFA is composite so its code field is followed by 3 data field.
+    // >DFA's first data field occupies words[85].link
+    try testing.expectEqual(@as(Address, @enumFromInt(codeFieldAddress(words[84].link))), words[85].link);
+
+    var node: u32 = @offsetOf(Header, "cold_start"); // points to CFA of "QUIT"
+    node = mem.readInt(u32, initial[node..][0..4], arch.endian());
+    try testing.expectEqual(0, mem.readInt(u32, initial[node..][0..4], arch.endian())); // CFA of "QUIT" is DOCOL ✓
+    node = mem.readInt(u32, initial[node + 4 ..][0..4], arch.endian()); // follow link to CFA of "R0"
+    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, initial[node..][0..4], arch.endian())); // CFA of "R0" is R0 ✓
 }
 
-fn mainWithoutEnv(c_argc: c_int, c_argv: [*][*:0]c_char) callconv(.c) c_int {
-    _ = @as([*][*:0]u8, @ptrCast(c_argv))[0..@as(usize, @intCast(c_argc))];
-    @call(.always_inline, main, .{});
-    return 0;
+fn cold_start(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    self.next(sp, rsp, ip, target);
 }
 
-comptime {
-    @export(&mainWithoutEnv, .{ .name = "__main_argc_argv" });
+fn run(memory: std.array_list.AlignedManaged(u8, .@"4"), reader: *std.Io.Reader, writer: *std.Io.Writer) void {
+    var env: Interp = .init(memory, reader, writer);
+
+    cold_start(
+        &env,
+        @offsetOf(Header, "return_stack"),
+        @offsetOf(Header, "input_buffer"),
+        @offsetOf(Header, "cold_start"),
+        0,
+    );
+}
+
+pub fn main(init: std.process.Init) !void {
+    var memory: std.array_list.AlignedManaged(u8, .@"4") = try .initCapacity(init.gpa, 0x20_000);
+    defer memory.deinit();
+    try memory.appendSlice(initial[0..]);
+    var header: *Header = @ptrCast(memory.items.ptr);
+    var stdin_reader = std.Io.File.stdin().reader(init.io, header.input_buffer[0..]);
+    var stdout_writer = std.Io.File.stdout().writer(init.io, header.output_buffer[0..]);
+
+    run(memory, &stdin_reader.interface, &stdout_writer.interface);
 }
 
 fn forth(input: []const u8, expected: [:0]const u8) !void {
-    var fixedReader: std.Io.Reader = .fixed(input);
+    var memory: std.array_list.AlignedManaged(u8, .@"4") = try .initCapacity(testing.allocator, 0x10_000);
+    defer memory.deinit();
+    try memory.appendSlice(initial[0..]);
+
+    var reader: std.Io.Reader = .fixed(input);
 
     var actual = mem.zeroes([2048]u8);
-    var fixedWriter: std.Io.Writer = .fixed(&actual);
-    run(&fixedReader, &fixedWriter);
+    var writer: std.Io.Writer = .fixed(&actual);
+    run(memory, &reader, &writer);
     try testing.expectEqualSlices(u8, expected, mem.sliceTo(actual[0..], 0));
 }
 
 test forth {
     // This is a stripped version of https://github.com/nornagon/jonesforth/blob/master/jonesforth.S
     // to bootstrap just enough "high-level" Forth so this test achieves reasonable coverage.
-    const preamble = fmt.comptimePrint(
+    const preamble =
         \\: / /MOD SWAP DROP ;
         \\: '\n' 10 ;
         \\: BL 32 ;
@@ -1058,26 +1141,26 @@ test forth {
         \\: WHILE     IMMEDIATE ' 0BRANCH , HERE @ 0 , ;
         \\: REPEAT    IMMEDIATE ' BRANCH , SWAP HERE @ - , DUP HERE @ SWAP - SWAP ! ;
         \\: NIP SWAP DROP ;
-        \\: PICK 1+ {d} * DSP@ + @ ;
+        \\: PICK 1+ 4 * DSP@ + @ ;
         \\: SPACES BEGIN DUP 0> WHILE SPACE 1- REPEAT DROP ;
         \\: U. BASE @ /MOD ?DUP IF RECURSE THEN DUP 10 < IF '0' ELSE 10 - 'A' THEN + EMIT ;
-        \\: .S DSP@ BEGIN DUP S0 @ < WHILE DUP @ U. {d}+ SPACE REPEAT DROP ;
+        \\: .S DSP@ BEGIN DUP S0 @ < WHILE DUP @ U. 4+ SPACE REPEAT DROP ;
         \\: UWIDTH BASE @ / ?DUP IF RECURSE 1+ ELSE 1 THEN ;
         \\: U.R SWAP DUP UWIDTH ROT SWAP - SPACES U. ;
         \\: .R SWAP DUP 0< IF NEGATE 1 SWAP ROT 1- ELSE 0 SWAP ROT THEN SWAP DUP UWIDTH ROT SWAP - SPACES SWAP IF '-' EMIT THEN U. ;
         \\: . 0 .R SPACE ;
         \\: U. U. SPACE ;
         \\: WITHIN -ROT OVER <= IF > IF TRUE ELSE FALSE THEN ELSE 2DROP FALSE THEN ;
-        \\: ALIGNED {d} 1- + -{d} AND ;
+        \\: ALIGNED 3 + -4 AND ;
         \\: ALIGN HERE @ ALIGNED HERE ! ;
         \\: C, HERE @ C! 1 HERE +! ;
         \\: S" IMMEDIATE STATE @ IF
-        \\  ' LITSTRING , HERE @ 0 , BEGIN KEY DUP '"' <> WHILE C, REPEAT DROP DUP HERE @ SWAP - {d}- SWAP ! ALIGN ELSE
+        \\  ' LITSTRING , HERE @ 0 , BEGIN KEY DUP '"' <> WHILE C, REPEAT DROP DUP HERE @ SWAP - 4- SWAP ! ALIGN ELSE
         \\  HERE @ BEGIN KEY DUP '"' <> WHILE OVER C! 1+ REPEAT DROP HERE @ - HERE @ SWAP THEN ;
         \\: ." IMMEDIATE STATE @ IF [COMPILE] S" ' TELL , ELSE BEGIN KEY DUP '"' = IF DROP EXIT THEN EMIT AGAIN THEN ;
-        \\: CELLS {d} * ;
-        \\: ID. {d}+ DUP C@ F_LENMASK AND BEGIN DUP 0> WHILE SWAP 1+ DUP C@ EMIT SWAP 1- REPEAT 2DROP ;
-        \\: ?IMMEDIATE {d}+ C@ F_IMMED AND ;
+        \\: CELLS 4 * ;
+        \\: ID. 4+ DUP C@ F_LENMASK AND BEGIN DUP 0> WHILE SWAP 1+ DUP C@ EMIT SWAP 1- REPEAT 2DROP ;
+        \\: ?IMMEDIATE 4+ C@ F_IMMED AND ;
         \\: CASE    IMMEDIATE 0 ;
         \\: OF      IMMEDIATE ' OVER , ' = , [COMPILE] IF ' DROP , ;
         \\: ENDOF   IMMEDIATE [COMPILE] ELSE ;
@@ -1087,27 +1170,25 @@ test forth {
         \\  ':' EMIT SPACE DUP ID. SPACE DUP ?IMMEDIATE IF ." IMMEDIATE " THEN >DFA
         \\  BEGIN 2DUP > WHILE DUP @
         \\      CASE
-        \\          ' LIT OF {d}+ DUP @ . ENDOF
-        \\          ' LITSTRING OF [ CHAR S ] LITERAL EMIT '"' EMIT SPACE {d}+ DUP @ SWAP {d}+ SWAP 2DUP TELL '"' EMIT SPACE + ALIGNED {d}- ENDOF
-        \\          ' 0BRANCH OF ." 0BRANCH ( " {d}+ DUP @ . ." ) " ENDOF
-        \\          '  BRANCH OF  ." BRANCH ( " {d}+ DUP @ . ." ) " ENDOF
-        \\          ' ' OF [ CHAR ' ] LITERAL EMIT SPACE {d}+ DUP CFA> ID. SPACE ENDOF
-        \\          ' EXIT OF 2DUP {d}+ <> IF ." EXIT " THEN ENDOF
+        \\          ' LIT OF 4+ DUP @ . ENDOF
+        \\          ' LITSTRING OF [ CHAR S ] LITERAL EMIT '"' EMIT SPACE 4+ DUP @ SWAP 4+ SWAP 2DUP TELL '"' EMIT SPACE + ALIGNED 4- ENDOF
+        \\          ' 0BRANCH OF ." 0BRANCH ( " 4+ DUP @ . ." ) " ENDOF
+        \\          '  BRANCH OF  ." BRANCH ( " 4+ DUP @ . ." ) " ENDOF
+        \\          ' ' OF [ CHAR ' ] LITERAL EMIT SPACE 4+ DUP CFA> ID. SPACE ENDOF
+        \\          ' EXIT OF 2DUP 4+ <> IF ." EXIT " THEN ENDOF
         \\          DUP CFA> ID. SPACE
         \\      ENDCASE
-        \\      {d}+
+        \\      4+
         \\  REPEAT
         \\ ';' EMIT CR 2DROP ;
         \\: ['] IMMEDIATE ' LIT , ;
         \\: EXCEPTION-MARKER RDROP 0 ;
-        \\: CATCH DSP@ {d}+ >R ' EXCEPTION-MARKER {d}+ >R EXECUTE ;
-        \\: THROW ?DUP IF RSP@ BEGIN DUP R0 {d}- < WHILE DUP @ ' EXCEPTION-MARKER {d}+ = IF {d}+ RSP! DUP DUP DUP R> {d}- SWAP OVER ! DSP! EXIT THEN {d}+ REPEAT
+        \\: CATCH DSP@ 4+ >R ' EXCEPTION-MARKER 4+ >R EXECUTE ;
+        \\: THROW ?DUP IF RSP@ BEGIN DUP R0 4- < WHILE DUP @ ' EXCEPTION-MARKER 4+ = IF 4+ RSP! DUP DUP DUP R> 4- SWAP OVER ! DSP! EXIT THEN 4+ REPEAT
         \\  DROP CASE 0 1- OF ." ABORTED" CR ENDOF ." UNCAUGHT THROW " DUP . CR ENDCASE QUIT THEN ;
         \\: STRLEN DUP BEGIN DUP C@ 0<> WHILE 1+ REPEAT SWAP - ;
-        \\ 
-    , .{@sizeOf(usize)} ** 24);
-
-    const s = mem.readInt(usize, "F" ** @sizeOf(usize), .little);
+        \\
+    ;
     const tests = .{
         .{ "65 EMIT ", "A" },
         .{ "777 65 EMIT ", "A" },
@@ -1116,22 +1197,12 @@ test forth {
         .{ "8 DUP * 1+ EMIT ", "A" },
         .{ "CHAR A EMIT ", "A" },
         .{ ": SLOW WORD FIND >CFA EXECUTE ; 65 SLOW EMIT ", "A" },
-        .{ fmt.comptimePrint("{d} DSP@ {d} TELL ", .{ s, @sizeOf(usize) }), "F" ** @sizeOf(usize) },
-        .{ fmt.comptimePrint("{d} DSP@ HERE @ {d} CMOVE HERE @ {d} TELL ", .{ s, @sizeOf(usize), @sizeOf(usize) }), "F" ** @sizeOf(usize) },
-        .{ fmt.comptimePrint("{d} DSP@ 2 NUMBER DROP EMIT ", .{mem.readInt(u16, "65", .little)}), "A" },
+        .{ "1179010630 DSP@ 4 TELL ", "FFFF" },
+        .{ "1179010630 DSP@ HERE @ 4 CMOVE HERE @ 4 TELL ", "FFFF" },
+        .{ "13622 DSP@ 2 NUMBER DROP EMIT ", "A" },
         .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
         .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
         .{ "64 >R 1 RSP@ +! RSP@ 1 TELL ", "A" },
-        .{
-            \\: <BUILDS WORD CREATE DODOES , 0 , ;
-            \\: DOES> R> LATEST @ >DFA ! ;
-            \\: CONST <BUILDS , DOES> @ ;
-            \\
-            \\65 CONST FOO
-            \\FOO EMIT 
-            ,
-            "A",
-        },
         .{ preamble ++ "VERSION . ", "47 " },
         .{ preamble ++ "CR ", "\n" },
         .{ preamble ++ "0 1 > . 1 0 > . ", "0 -1 " },
@@ -1147,9 +1218,9 @@ test forth {
         .{ preamble ++ "F_IMMED F_HIDDEN .S ", "32 128 " },
         .{ preamble ++ ": CFA@ WORD FIND >CFA @ ; CFA@ >DFA DOCOL = . ", "-1 " },
         .{ preamble ++ "3 4 5 WITHIN . ", "0 " },
-        .{ preamble ++ "SEE >DFA ", fmt.comptimePrint(": >DFA >CFA {d}+ EXIT ;\n", .{@sizeOf(usize)}) },
+        .{ preamble ++ "SEE >DFA ", ": >DFA >CFA 4+ ;\n" },
         .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
-        .{ preamble ++ "SEE QUIT ", fmt.comptimePrint(": QUIT R0 RSP! INTERPRET BRANCH ( -{d} ) ;\n", .{2 * @sizeOf(usize)}) },
+        .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -8 ) ;\n" },
         .{ preamble ++ "SEE / ", ": / /MOD SWAP DROP ;\n" },
         .{
             preamble ++
@@ -1168,17 +1239,6 @@ test forth {
         const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
         defer testing.allocator.free(p);
 
-        try forth(preamble ++ ": ARGC (ARGC) @ ; ARGC . ", "4 ");
-        try forth(preamble ++ ": ARGC (ARGC) @ ; : ENVIRON ARGC 2 + CELLS (ARGC) + ; ENVIRON @ DUP STRLEN TELL ", mem.sliceTo(os.environ[0], 0));
         try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
-    }
-}
-
-test "word addresses increase" {
-    var node: *const Word = @ptrCast(&syscall0);
-    while (node.link) |link| : (node = link) {
-        const a: [*]const Instr = @ptrCast(link);
-        const b: [*]const Instr = @ptrCast(node);
-        try testing.expect(b - a > offset);
     }
 }
