@@ -224,8 +224,10 @@ const Interp = struct {
             }
         }
         while (ch > ' ') {
-            buffer[i] = ch;
-            i += 1;
+            if (i < F_LENMASK) { // longer names do not fit in the flag byte
+                buffer[i] = ch;
+                i += 1;
+            }
             ch = try self.key();
         }
         return buffer[0..i];
@@ -237,11 +239,11 @@ const Interp = struct {
     }
 
     pub inline fn writeInt(self: Self, address: usize, val: i32) void {
-        mem.writeInt(i32, self.memory.items[address..][0..4], val, arch.endian());
+        mem.writeInt(i32, self.memory.items[address..][0..4], val, .native);
     }
 
     pub inline fn readInt(self: Self, address: usize) i32 {
-        return mem.readInt(i32, self.memory.items[address..][0..4], arch.endian());
+        return mem.readInt(i32, self.memory.items[address..][0..4], .native);
     }
 
     pub fn find(self: Self, name: []const u8) ?*const Word.Data {
@@ -257,8 +259,18 @@ const Interp = struct {
         return node;
     }
 
+    /// `memory` must never be reallocated: `main` hands the stdin and stdout
+    /// buffers slices of it, and `slice` hands out unchecked pointers past
+    /// `items.len`.  So check against the capacity reserved at startup rather
+    /// than growing into a fresh allocation.
+    pub inline fn reserve(self: Self, n: usize) void {
+        if (self.memory.capacity - self.memory.items.len < n)
+            @panic("dictionary is full");
+    }
+
     pub fn append(self: *Self, instr: Address.Data) void {
         self.memory.items.len = @abs(self.readInt(@offsetOf(Header, "here")));
+        self.reserve(@sizeOf(Address.Data));
         self.memory.appendSlice(mem.asBytes(&instr)) catch @panic("append cannot appendSlice");
         self.writeInt(@offsetOf(Header, "here"), @intCast(self.memory.items.len));
     }
@@ -566,16 +578,16 @@ fn _ccopy(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callco
 }
 
 fn _cmove(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
+    // ( source dest length -- )
     const n = @abs(self.readInt(sp));
     const p = @abs(self.readInt(sp + 4));
     const q = @abs(self.readInt(sp + 8));
     @memcpy(self.slice(p, n), self.slice(q, n));
-    self.writeInt(sp + 8, @intCast(p));
-    self.next(sp + 8, rsp, ip, target);
+    self.next(sp + 12, rsp, ip, target);
 }
 
 fn _here(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    self.memory.ensureUnusedCapacity(@sizeOf(Address)) catch @panic("_here cannot ensureUnusedCapacity");
+    self.reserve(@sizeOf(Address));
     self.writeInt(sp - 4, @offsetOf(Header, "here"));
     self.next(sp - 4, rsp, ip, target);
 }
@@ -664,6 +676,11 @@ inline fn _tcfa(sp: [*]i32) [*]i32 {
 
 fn _create(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
     const name = self.slice(@abs(self.readInt(sp + 4)), @abs(self.readInt(sp)));
+    // `Word.Data` is read back through `@alignCast`, and `C,` advances HERE one
+    // byte at a time, so a definition that forgets ALIGN would make that UB.
+    const here = @abs(self.readInt(@offsetOf(Header, "here")));
+    if (here % @alignOf(Word.Data) != 0)
+        @panic("_create needs an aligned HERE");
     var word: Word.Data = .{
         .link = @enumFromInt(self.readInt(@offsetOf(Header, "latest"))),
         .flag = @truncate(name.len),
@@ -671,7 +688,9 @@ fn _create(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callc
         .code = undefined,
     };
     @memcpy(word.name[0..name.len], name);
-    self.writeInt(@offsetOf(Header, "latest"), @intCast(self.memory.items.len));
+    self.memory.items.len = here; // C, can leave HERE ahead of items.len
+    self.reserve(@sizeOf(Word.Data));
+    self.writeInt(@offsetOf(Header, "latest"), @intCast(here));
     self.memory.appendSlice(mem.asBytes(&word)) catch @panic("_create cannot appendSlice");
     self.memory.items.len -= 4; // .code is undefined
     self.writeInt(@offsetOf(Header, "here"), @intCast(self.memory.items.len));
@@ -835,10 +854,11 @@ fn _syscall1(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) cal
             self.writeInt(sp + 4, std.c.close(file));
         },
         .brk => {
-            const m = self.memory.capacity;
-            const n = @abs(self.readInt(sp + 4));
-            self.memory.ensureTotalCapacityPrecise(m + n) catch @panic("_syscall1 cannot ensureTotalCapacityPrecise");
-            self.writeInt(sp + 4, @intCast(m));
+            // brk(0) reports the break; brk(addr) moves it.  Neither can
+            // reallocate here, so the break is pinned at the reserved capacity
+            // and an out-of-range request fails the way brk(2) does, by
+            // returning the unchanged break.
+            self.writeInt(sp + 4, @intCast(self.memory.capacity));
         },
         else => {},
     }
@@ -967,7 +987,7 @@ const primitives = [_]*const Code{
 
 const numBytes = @sizeOf(Header) + @sizeOf(Word.Data) * 107 + 30 * @sizeOf(Address.Data);
 fn defwords() [numBytes]u8 {
-    @setEvalBranchQuota(5_000);
+    @setEvalBranchQuota(4_000);
     var latest: u32 = 0;
     var buffer: [numBytes]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
@@ -999,7 +1019,7 @@ fn defwords() [numBytes]u8 {
         };
         @memcpy(word.name[0..name.len], name);
         latest = @truncate(writer.end);
-        writer.writeStruct(word, arch.endian()) catch @panic("defwords cannot write word");
+        writer.writeStruct(word, .native) catch unreachable;
 
         var it = mem.tokenizeScalar(u8, switch (i) {
             84 => ">CFA 4+ EXIT",
@@ -1012,12 +1032,12 @@ fn defwords() [numBytes]u8 {
 
         while (it.next()) |item| {
             if (fmt.parseInt(i32, item, 10)) |num| {
-                try writer.writeInt(i32, num, arch.endian());
+                try writer.writeInt(i32, num, .native);
             } else |_| {
                 var node = latest;
                 while (buffer[node + 4] & F_LENMASK != item.len or !mem.eql(u8, buffer[node + 5 ..][0..item.len], item))
-                    node = mem.readInt(u32, buffer[node..][0..4], arch.endian());
-                writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), arch.endian()) catch @panic("defwords cannot write node");
+                    node = mem.readInt(u32, buffer[node..][0..4], .native);
+                writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), .native) catch unreachable;
             }
         }
     }
@@ -1025,7 +1045,7 @@ fn defwords() [numBytes]u8 {
 
     var quit = latest;
     while (buffer[quit + 4] != 4 or !mem.eql(u8, buffer[quit + 5 ..][0..4], "QUIT"))
-        quit = mem.readInt(u32, buffer[quit..][0..4], arch.endian());
+        quit = mem.readInt(u32, buffer[quit..][0..4], .native);
 
     const header: Header = .{
         .stack = @splat(0),
@@ -1041,7 +1061,7 @@ fn defwords() [numBytes]u8 {
         .cold_start = .{quit + @offsetOf(Word.Data, "code")},
     };
     writer.undo(numBytes); // rewind to start
-    writer.writeStruct(header, arch.endian()) catch @panic("defwords cannot write header");
+    writer.writeStruct(header, .native) catch unreachable;
     return buffer;
 }
 
@@ -1066,10 +1086,10 @@ test "defwords" {
     try testing.expectEqual(@as(Address, @enumFromInt(codeFieldAddress(words[84].link))), words[85].link);
 
     var node: u32 = @offsetOf(Header, "cold_start"); // points to CFA of "QUIT"
-    node = mem.readInt(u32, initial[node..][0..4], arch.endian());
-    try testing.expectEqual(0, mem.readInt(u32, initial[node..][0..4], arch.endian())); // CFA of "QUIT" is DOCOL ✓
-    node = mem.readInt(u32, initial[node + 4 ..][0..4], arch.endian()); // follow link to CFA of "R0"
-    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, initial[node..][0..4], arch.endian())); // CFA of "R0" is R0 ✓
+    node = mem.readInt(u32, initial[node..][0..4], .native);
+    try testing.expectEqual(0, mem.readInt(u32, initial[node..][0..4], .native)); // CFA of "QUIT" is DOCOL ✓
+    node = mem.readInt(u32, initial[node + 4 ..][0..4], .native); // follow link to CFA of "R0"
+    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, initial[node..][0..4], .native)); // CFA of "R0" is R0 ✓
 }
 
 fn cold_start(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
@@ -1199,6 +1219,8 @@ test forth {
         .{ ": SLOW WORD FIND >CFA EXECUTE ; 65 SLOW EMIT ", "A" },
         .{ "1179010630 DSP@ 4 TELL ", "FFFF" },
         .{ "1179010630 DSP@ HERE @ 4 CMOVE HERE @ 4 TELL ", "FFFF" },
+        // CMOVE consumes all three arguments, so only the literal is left
+        .{ preamble ++ "1179010630 DSP@ HERE @ 4 CMOVE .S ", "1179010630 " },
         .{ "13622 DSP@ 2 NUMBER DROP EMIT ", "A" },
         .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
         .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
@@ -1222,6 +1244,10 @@ test forth {
         .{ preamble ++ "SEE HIDE ", ": HIDE WORD FIND HIDDEN ;\n" },
         .{ preamble ++ "SEE QUIT ", ": QUIT R0 RSP! INTERPRET BRANCH ( -8 ) ;\n" },
         .{ preamble ++ "SEE / ", ": / /MOD SWAP DROP ;\n" },
+        // a 4-byte LITSTRING pins the padding arithmetic
+        .{ preamble ++ ": PAD4 .\" ABCD\" ; PAD4 ", "ABCD" },
+        // built-in headers really are writable
+        .{ preamble ++ "HIDE (ARGC) WORD (ARGC) FIND 0= . ", "-1 " },
         .{
             preamble ++
                 \\: FOO THROW ;
