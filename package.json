@@ -1,6 +1,13 @@
 {
   "devDependencies": {
     "coi-serviceworker": "^0.1.7",
+    "puppeteer": "^25.12.0",
     "xterm-pty": "^0.11.1"
+  },
+  "scripts": {
+    "test:browser": "node --test browser/zorth.browser.mjs"
+  },
+  "allowScripts": {
+    "puppeteer@25.12.0": true
   }
 }
