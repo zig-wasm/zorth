@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) !void {
     try emcc_settings.put("PROXY_TO_PTHREAD", "1");
     try emcc_settings.put("EXPORTED_FUNCTIONS", "_malloc,_main");
 
-    const emcc_step = zemscripten.emccStep(b, lib, .{
+    const emcc_step = zemscripten.emccStep(b, &.{}, &.{lib}, .{
         .optimize = optimize,
         .flags = emcc_flags,
         .settings = emcc_settings,
@@ -93,7 +93,8 @@ pub fn build(b: *std.Build) !void {
             .link_libc = true,
         }),
     });
-    wasm_tests.setExecCmd(&.{ "wasmtime", null });
     const run_wasm_tests = b.addRunArtifact(wasm_tests);
+    // Run with `-fwasmtime` to have the wasm32-wasi binary executed under
+    // wasmtime; `Compile.setExecCmd` was removed in Zig 0.17.0.
     test_step.dependOn(&run_wasm_tests.step);
 }

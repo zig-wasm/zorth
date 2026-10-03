@@ -18,6 +18,7 @@ const syscalls = os.linux.syscalls;
 const testing = std.testing;
 const builtin = @import("builtin");
 const arch = builtin.cpu.arch;
+const native = arch.endian();
 
 const conv: std.builtin.CallingConvention = switch (arch) {
     .x86_64 => .winapi,
@@ -161,7 +162,7 @@ inline fn codeFieldAddress(w: Address) usize {
 
 inline fn openFlags(flags: usize) std.c.O {
     return switch (builtin.os.tag) {
-        .emscripten => .{
+        .linux, .macos, .emscripten => .{
             .ACCMODE = @enumFromInt(flags & O_RDWR),
             .CREAT = (flags & O_CREAT) != 0,
             .EXCL = (flags & O_EXCL) != 0,
@@ -181,6 +182,17 @@ inline fn openFlags(flags: usize) std.c.O {
         else => unreachable,
     };
 }
+
+const Syscall = if (builtin.os.tag == .macos) enum(i32) {
+    exit = 0x2000001,
+    read = 0x2000003,
+    write = 0x2000004,
+    open = 0x2000005,
+    close = 0x2000006,
+    getppid = 0x2000027,
+    creat = 0x2000008,
+    brk = 0x20000d6,
+} else syscalls.X64;
 
 const Interp = struct {
     const Self = @This();
@@ -239,11 +251,11 @@ const Interp = struct {
     }
 
     pub inline fn writeInt(self: Self, address: usize, val: i32) void {
-        mem.writeInt(i32, self.memory.items[address..][0..4], val, .native);
+        mem.writeInt(i32, self.memory.items[address..][0..4], val, native);
     }
 
     pub inline fn readInt(self: Self, address: usize) i32 {
-        return mem.readInt(i32, self.memory.items[address..][0..4], .native);
+        return mem.readInt(i32, self.memory.items[address..][0..4], native);
     }
 
     pub fn find(self: Self, name: []const u8) ?*const Word.Data {
@@ -799,13 +811,13 @@ fn _execute(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) call
 }
 
 inline fn _syscall3(sp: [*]i32) [*]i32 {
-    const number_: syscalls.X64 = @enumFromInt(sp[0]);
+    const number_: Syscall = @enumFromInt(sp[0]);
 
     switch (number_) {
         .open => {
             const p: usize = @abs(sp[1]);
             const file_path: [*:0]u8 = @ptrFromInt(p);
-            const mode: std.c.mode_t = @abs(sp[3]);
+            const mode: std.c.mode_t = @truncate(@abs(sp[3]));
             sp[3] = std.c.openat(std.c.AT.FDCWD, file_path, openFlags(@abs(sp[2])), mode);
         },
         .read => {
@@ -828,7 +840,7 @@ inline fn _syscall3(sp: [*]i32) [*]i32 {
 }
 
 inline fn _syscall2(sp: [*]i32) [*]i32 {
-    const number_: syscalls.X64 = @enumFromInt(sp[0]);
+    const number_: Syscall = @enumFromInt(sp[0]);
 
     switch (number_) {
         .open => {
@@ -842,7 +854,7 @@ inline fn _syscall2(sp: [*]i32) [*]i32 {
 }
 
 fn _syscall1(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    const number_: syscalls.X64 = @enumFromInt(self.readInt(sp));
+    const number_: Syscall = @enumFromInt(self.readInt(sp));
 
     switch (number_) {
         .exit => {
@@ -866,11 +878,13 @@ fn _syscall1(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) cal
 }
 
 inline fn _syscall0(sp: [*]i32) [*]i32 {
-    const number_: syscalls.X64 = @enumFromInt(sp[0]);
+    const number_: Syscall = @enumFromInt(sp[0]);
     switch (number_) {
         .getppid => {
             sp[0] = if (arch.isWasm())
                 @panic("getppid not supported")
+            else if (builtin.os.tag == .macos)
+                @intCast(std.c.getppid())
             else
                 @intCast(os.linux.getppid());
         },
@@ -937,13 +951,13 @@ const primitives = [_]*const Code{
     value(@intFromEnum(Flag.IMMED)),
     value(@intFromEnum(Flag.HIDDEN)),
     value(F_LENMASK),
-    value(@intFromEnum(syscalls.X64.exit)),
-    value(@intFromEnum(syscalls.X64.open)),
-    value(@intFromEnum(syscalls.X64.close)),
-    value(@intFromEnum(syscalls.X64.read)),
-    value(@intFromEnum(syscalls.X64.write)),
-    value(@intFromEnum(syscalls.X64.creat)),
-    value(@intFromEnum(syscalls.X64.brk)),
+    value(@intFromEnum(Syscall.exit)),
+    value(@intFromEnum(Syscall.open)),
+    value(@intFromEnum(Syscall.close)),
+    value(@intFromEnum(Syscall.read)),
+    value(@intFromEnum(Syscall.write)),
+    value(@intFromEnum(Syscall.creat)),
+    value(@intFromEnum(Syscall.brk)),
     value(O_RDONLY),
     value(O_WRONLY),
     value(O_RDWR),
@@ -1019,7 +1033,7 @@ fn defwords() [numBytes]u8 {
         };
         @memcpy(word.name[0..name.len], name);
         latest = @truncate(writer.end);
-        writer.writeStruct(word, .native) catch unreachable;
+        writer.writeStruct(word, native) catch unreachable;
 
         var it = mem.tokenizeScalar(u8, switch (i) {
             84 => ">CFA 4+ EXIT",
@@ -1032,12 +1046,12 @@ fn defwords() [numBytes]u8 {
 
         while (it.next()) |item| {
             if (fmt.parseInt(i32, item, 10)) |num| {
-                try writer.writeInt(i32, num, .native);
+                try writer.writeInt(i32, num, native);
             } else |_| {
                 var node = latest;
                 while (buffer[node + 4] & F_LENMASK != item.len or !mem.eql(u8, buffer[node + 5 ..][0..item.len], item))
-                    node = mem.readInt(u32, buffer[node..][0..4], .native);
-                writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), .native) catch unreachable;
+                    node = mem.readInt(u32, buffer[node..][0..4], native);
+                writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), native) catch unreachable;
             }
         }
     }
@@ -1045,7 +1059,7 @@ fn defwords() [numBytes]u8 {
 
     var quit = latest;
     while (buffer[quit + 4] != 4 or !mem.eql(u8, buffer[quit + 5 ..][0..4], "QUIT"))
-        quit = mem.readInt(u32, buffer[quit..][0..4], .native);
+        quit = mem.readInt(u32, buffer[quit..][0..4], native);
 
     const header: Header = .{
         .stack = @splat(0),
@@ -1061,7 +1075,7 @@ fn defwords() [numBytes]u8 {
         .cold_start = .{quit + @offsetOf(Word.Data, "code")},
     };
     writer.undo(numBytes); // rewind to start
-    writer.writeStruct(header, .native) catch unreachable;
+    writer.writeStruct(header, native) catch unreachable;
     return buffer;
 }
 
@@ -1086,10 +1100,10 @@ test "defwords" {
     try testing.expectEqual(@as(Address, @enumFromInt(codeFieldAddress(words[84].link))), words[85].link);
 
     var node: u32 = @offsetOf(Header, "cold_start"); // points to CFA of "QUIT"
-    node = mem.readInt(u32, initial[node..][0..4], .native);
-    try testing.expectEqual(0, mem.readInt(u32, initial[node..][0..4], .native)); // CFA of "QUIT" is DOCOL ✓
-    node = mem.readInt(u32, initial[node + 4 ..][0..4], .native); // follow link to CFA of "R0"
-    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, initial[node..][0..4], .native)); // CFA of "R0" is R0 ✓
+    node = mem.readInt(u32, initial[node..][0..4], native);
+    try testing.expectEqual(0, mem.readInt(u32, initial[node..][0..4], native)); // CFA of "QUIT" is DOCOL ✓
+    node = mem.readInt(u32, initial[node + 4 ..][0..4], native); // follow link to CFA of "R0"
+    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, initial[node..][0..4], native)); // CFA of "R0" is R0 ✓
 }
 
 fn cold_start(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
@@ -1262,9 +1276,10 @@ test forth {
         try forth(t.@"0", t.@"1");
 
     if (!arch.isWasm()) {
-        const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{os.linux.getppid()}, 0);
+        const ppid = if (builtin.os.tag == .macos) std.c.getppid() else os.linux.getppid();
+        const p = try fmt.allocPrintSentinel(testing.allocator, "{d} ", .{ppid}, 0);
         defer testing.allocator.free(p);
 
-        try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(syscalls.X64.getppid)}), p);
+        try forth(preamble ++ fmt.comptimePrint(": GETPPID {d} SYSCALL0 ; GETPPID . ", .{@intFromEnum(Syscall.getppid)}), p);
     }
 }
