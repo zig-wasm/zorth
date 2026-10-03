@@ -163,7 +163,9 @@ inline fn codeFieldAddress(w: Address) usize {
 inline fn openFlags(flags: usize) std.c.O {
     return switch (builtin.os.tag) {
         .linux, .macos, .emscripten => .{
-            .ACCMODE = @enumFromInt(flags & O_RDWR),
+            // O_RDWR (2) alone only covers bit 1; RDONLY/WRONLY/RDWR need
+            // both access-mode bits (0 and 1), i.e. O_WRONLY | O_RDWR (3).
+            .ACCMODE = @enumFromInt(flags & (O_WRONLY | O_RDWR)),
             .CREAT = (flags & O_CREAT) != 0,
             .EXCL = (flags & O_EXCL) != 0,
             .TRUNC = (flags & O_TRUNC) != 0,
@@ -891,6 +893,49 @@ inline fn _syscall0(sp: [*]i32) [*]i32 {
         else => {},
     }
     return sp;
+}
+
+test "openFlags translates POSIX O_* bits on the .linux/.macos/.emscripten branch" {
+    // This branch covered only .emscripten before; .linux was `unreachable`
+    // (a latent bug, since native Linux is the CI test target) and .macos
+    // is new. _syscall3's actual open()/read()/write() cases can't be
+    // exercised with real pointers here: cells are i32, but a 64-bit host
+    // hands out 64-bit heap/stack addresses that don't fit, so this checks
+    // the pure flag-translation logic instead.
+    if (builtin.os.tag == .wasi) return error.SkipZigTest; // .wasi has a differently-shaped std.c.O
+
+    const AccMode = @TypeOf(@as(std.c.O, undefined).ACCMODE);
+
+    const rdonly = openFlags(O_RDONLY);
+    try testing.expectEqual(@as(AccMode, @enumFromInt(O_RDONLY)), rdonly.ACCMODE);
+    try testing.expect(!rdonly.CREAT);
+
+    const flags = openFlags(O_WRONLY | O_CREAT | O_TRUNC);
+    try testing.expectEqual(@as(AccMode, @enumFromInt(O_WRONLY)), flags.ACCMODE);
+    try testing.expect(flags.CREAT);
+    try testing.expect(flags.TRUNC);
+    try testing.expect(!flags.EXCL);
+    try testing.expect(!flags.APPEND);
+    try testing.expect(!flags.NONBLOCK);
+}
+
+test "_syscall0 getppid matches the host libc/kernel value, including on macOS" {
+    // Exercises the portable Syscall enum end-to-end: previously only
+    // syscalls.X64 existed, so this path only ever ran on Linux.
+    if (arch.isWasm()) return error.SkipZigTest; // .getppid panics under wasm by design
+
+    var stack = [_]i32{@intFromEnum(Syscall.getppid)};
+    _ = _syscall0(&stack);
+    const expected: i32 = if (builtin.os.tag == .macos) @intCast(std.c.getppid()) else @intCast(os.linux.getppid());
+    try testing.expectEqual(expected, stack[0]);
+}
+
+test "mode_t truncation does not crash on macOS's 16-bit std.c.mode_t" {
+    // Without @truncate this is a compile error on macOS, where mode_t is
+    // u16 instead of Linux's u32 (narrower than the i32 cell holding it).
+    // 0o644 is a realistic permission value and fits either width unchanged.
+    const mode: std.c.mode_t = @truncate(@abs(@as(i32, 0o644)));
+    try testing.expectEqual(@as(std.c.mode_t, 0o644), mode);
 }
 
 const primitives = [_]*const Code{
