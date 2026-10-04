@@ -481,12 +481,16 @@ fn _fetchbyte(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) ca
 }
 
 fn _ccopy(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
-    const p = @abs(self.readInt(sp));
-    const q = @abs(self.readInt(sp + 4));
+    // ( source dest -- source+1 dest+1 ), per jonesforth.S: dest is on top,
+    // source is one cell below; both addresses are left incremented.
+    const dest = @abs(self.readInt(sp));
+    const source = @abs(self.readInt(sp + 4));
 
     const memory = self.memory.items.ptr;
-    memory[q] = memory[p];
-    self.next(sp + 8, rsp, ip, target);
+    memory[dest] = memory[source];
+    self.writeInt(sp, @intCast(dest + 1));
+    self.writeInt(sp + 4, @intCast(source + 1));
+    self.next(sp, rsp, ip, target);
 }
 
 fn _cmove(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
@@ -1176,7 +1180,7 @@ test forth {
         .{ preamble ++ "1179010630 DSP@ HERE @ 4 CMOVE .S ", "1179010630 " },
         .{ "13622 DSP@ 2 NUMBER DROP EMIT ", "A" },
         .{ "64 >R RSP@ 1 TELL RDROP ", "@" },
-        .{ "64 DSP@ RSP@ SWAP C@C! RSP@ 1 TELL ", "@" },
+        .{ "64 DSP@ RSP@ C@C! RSP@ 1 TELL ", "@" },
         .{ "64 >R 1 RSP@ +! RSP@ 1 TELL ", "A" },
         .{ preamble ++ "VERSION . ", "47 " },
         .{ preamble ++ "CR ", "\n" },
