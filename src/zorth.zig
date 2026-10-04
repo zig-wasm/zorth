@@ -38,108 +38,6 @@ const Flag = enum(u8) { IMMED = 0x80, HIDDEN = ' ', ZERO = 0x0 };
 
 // https://matklad.github.io/2025/12/23/zig-newtypes-index-pattern.html
 const Word = enum(u32) {
-    DROP = 1,
-    SWAP,
-    DUP,
-    OVER,
-    ROT,
-    @"-ROT",
-    @"2DROP",
-    @"2DUP",
-    @"2SWAP",
-    @"?DUP",
-    @"1+",
-    @"1-",
-    @"4+",
-    @"4-",
-    @"+",
-    @"-",
-    @"*",
-    @"/MOD",
-    @"=",
-    @"<>",
-    @"<",
-    @">",
-    @"<=",
-    @">=",
-    @"0=",
-    @"0<>",
-    @"0<",
-    @"0>",
-    @"0<=",
-    @"0>=",
-    AND,
-    OR,
-    XOR,
-    INVERT,
-    EXIT,
-    LIT,
-    @"!",
-    @"@",
-    @"+!",
-    @"-!",
-    @"C!",
-    @"C@",
-    @"C@C!",
-    CMOVE,
-    STATE,
-    HERE,
-    LATEST,
-    S0,
-    BASE,
-    @"(ARGC)",
-    VERSION,
-    R0,
-    DOCOL,
-    F_IMMED,
-    F_HIDDEN,
-    F_LENMASK,
-    SYS_EXIT,
-    SYS_OPEN,
-    SYS_CLOSE,
-    SYS_READ,
-    SYS_WRITE,
-    SYS_CREAT,
-    SYS_BRK,
-    O_RDONLY,
-    O_WRONLY,
-    O_RDWR,
-    O_CREAT,
-    O_EXCL,
-    O_TRUNC,
-    O_APPEND,
-    O_NONBLOCK,
-    @">R",
-    @"R>",
-    @"RSP@",
-    @"RSP!",
-    RDROP,
-    @"DSP@",
-    @"DSP!",
-    KEY,
-    EMIT,
-    WORD,
-    NUMBER,
-    FIND,
-    @">CFA",
-    CREATE,
-    @",",
-    @"[",
-    @"]",
-    IMMEDIATE,
-    HIDDEN,
-    @"'",
-    BRANCH,
-    @"0BRANCH",
-    LITSTRING,
-    TELL,
-    INTERPRET,
-    CHAR,
-    EXECUTE,
-    SYSCALL3,
-    SYSCALL2,
-    SYSCALL1,
-    SYSCALL0,
     _,
 
     /// The layout of this `struct` is very important for introspection to work.
@@ -1046,65 +944,60 @@ const primitives = [_]*const Code{
 
 const numBytes = @sizeOf(Header) + @sizeOf(Word.Data) * 107 + 30 * @sizeOf(Address.Data);
 fn defwords() [numBytes]u8 {
-    @setEvalBranchQuota(4_000);
+    @setEvalBranchQuota(8_650);
+    const names =
+        \\DROP SWAP DUP OVER ROT -ROT 2DROP 2DUP 2SWAP ?DUP 1+ 1- 4+ 4- + - * /MOD = <> < > <= >= 0= 0<> 0< 0> 0<= 0>=
+        \\AND OR XOR INVERT EXIT LIT ! @ +! -! C! C@ C@C! CMOVE STATE HERE LATEST S0 BASE (ARGC) VERSION R0 DOCOL
+        \\F_IMMED F_HIDDEN F_LENMASK SYS_EXIT SYS_OPEN SYS_CLOSE SYS_READ SYS_WRITE SYS_CREAT SYS_BRK
+        \\O_RDONLY O_WRONLY O_RDWR O_CREAT O_EXCL O_TRUNC O_APPEND O_NONBLOCK >R R> RSP@ RSP! RDROP DSP@ DSP!
+        \\KEY EMIT WORD NUMBER FIND >CFA >DFA CREATE , [ ] IMMEDIATE HIDDEN : ; HIDE ' BRANCH 0BRANCH LITSTRING TELL
+        \\INTERPRET QUIT CHAR EXECUTE SYSCALL3 SYSCALL2 SYSCALL1 SYSCALL0
+    ;
+    const immediate = "[ IMMEDIATE ;";
+    const composite: std.StaticStringMap([]const u8) = .initComptime(.{
+        .{ ">DFA", ">CFA 4+ EXIT" },
+        .{ ":", "WORD CREATE LIT 0 , LATEST @ HIDDEN ] EXIT" },
+        .{ ";", "LIT EXIT , LATEST @ HIDDEN [ EXIT" },
+        .{ "HIDE", "WORD FIND HIDDEN EXIT" },
+        .{ "QUIT", "R0 RSP! INTERPRET BRANCH -8" },
+    });
     var latest: u32 = 0;
-    var buffer: [numBytes]u8 = undefined;
+    var code: u32 = 1;
+    var buffer: [numBytes]u8 align(4) = @splat(0);
     var writer: std.Io.Writer = .fixed(&buffer);
     writer.advance(@sizeOf(Header));
-    for (0..107) |i| {
-        const code: Word = @enumFromInt(switch (i) {
-            0...83 => i + 1, // skip DOCOL
-            85...90 => i, // >DFA is composite
-            94...99 => i - 3, // : ; and HIDE are composite
-            101...106 => i - 4, // QUIT is composite
-            else => 0,
-        });
-        const name = switch (i) {
-            84 => ">DFA",
-            91 => ":",
-            92 => ";",
-            93 => "HIDE",
-            100 => "QUIT",
-            else => @tagName(code),
-        };
+
+    var iter_name = mem.tokenizeAny(u8, names, " \n");
+    while (iter_name.next()) |name| {
+        const definition = composite.get(name) orelse "";
         var word: Word.Data = .{
             .link = @enumFromInt(latest),
-            .flag = @truncate(name.len | switch (i) {
-                87, 89, 92 => @intFromEnum(Flag.IMMED),
-                else => 0,
-            }),
+            .flag = @truncate(name.len | if (mem.indexOf(u8, immediate, name)) |_| @intFromEnum(Flag.IMMED) else 0),
             .name = @splat(0),
-            .code = code,
+            .code = @enumFromInt(if (definition.len > 0) 0 else code),
         };
         @memcpy(word.name[0..name.len], name);
         latest = @truncate(writer.end);
+        code += if (definition.len > 0) 0 else 1;
         writer.writeStruct(word, native) catch unreachable;
 
-        var it = mem.tokenizeScalar(u8, switch (i) {
-            84 => ">CFA 4+ EXIT",
-            91 => "WORD CREATE LIT 0 , LATEST @ HIDDEN ] EXIT",
-            92 => "LIT EXIT , LATEST @ HIDDEN [ EXIT",
-            93 => "WORD FIND HIDDEN EXIT",
-            100 => "R0 RSP! INTERPRET BRANCH -8",
-            else => "",
-        }, ' ');
-
+        var it = mem.tokenizeScalar(u8, definition, ' ');
         while (it.next()) |item| {
             if (fmt.parseInt(i32, item, 10)) |num| {
-                try writer.writeInt(i32, num, native);
+                writer.writeInt(i32, num, native) catch unreachable;
             } else |_| {
                 var node = latest;
-                while (buffer[node + 4] & F_LENMASK != item.len or !mem.eql(u8, buffer[node + 5 ..][0..item.len], item))
-                    node = mem.readInt(u32, buffer[node..][0..4], native);
+                while (writer.buffer[node + 4] & F_LENMASK != item.len or !mem.eql(u8, writer.buffer[node + 5 ..][0..item.len], item))
+                    node = @bitCast(writer.buffer[node..][0..4].*);
                 writer.writeInt(u32, node + @offsetOf(Word.Data, "code"), native) catch unreachable;
             }
         }
     }
-    std.debug.assert(writer.end == numBytes);
+    const here = writer.end;
 
     var quit = latest;
-    while (buffer[quit + 4] != 4 or !mem.eql(u8, buffer[quit + 5 ..][0..4], "QUIT"))
-        quit = mem.readInt(u32, buffer[quit..][0..4], native);
+    while (writer.buffer[quit + 4] != 4 or !mem.eql(u8, writer.buffer[quit + 5 ..][0..4], "QUIT"))
+        quit = @bitCast(writer.buffer[quit..][0..4].*);
 
     const header: Header = .{
         .stack = @splat(0),
@@ -1112,14 +1005,14 @@ fn defwords() [numBytes]u8 {
         .input_buffer = @splat(0),
         .output_buffer = @splat(0),
         .state = 0,
-        .here = numBytes,
+        .here = @truncate(here),
         .latest = latest,
-        .s0 = 0x2_000,
+        .s0 = @offsetOf(Header, "return_stack"),
         .base = 10,
         .buffer = @splat(0),
         .cold_start = .{quit + @offsetOf(Word.Data, "code")},
     };
-    writer.undo(numBytes); // rewind to start
+    writer.undo(here); // rewind to start
     writer.writeStruct(header, native) catch unreachable;
     return buffer;
 }
@@ -1128,16 +1021,17 @@ const initial: [numBytes]u8 align(4) = defwords();
 
 test "defwords" {
     const start = @sizeOf(Header);
+    const header: *const Header = @ptrCast(initial[0..start]);
     const words: [*]const Word.Data = @ptrCast(initial[start..]);
+    try testing.expectEqual(numBytes, header.here);
     try testing.expectEqual(.sentinel, words[0].link);
     try testing.expectEqualSlices(u8, "DROP", words[0].name[0..words[0].flag]);
-    try testing.expectEqual(.DROP, words[0].code);
+    for (words[0..84], 1..) |word, i|
+        try testing.expectEqual(i, @intFromEnum(word.code));
     try testing.expectEqual(@as(Address, @enumFromInt(start)), words[1].link);
     try testing.expectEqualSlices(u8, "SWAP", words[1].name[0..words[1].flag]);
-    try testing.expectEqual(.LIT, words[35].code);
-    try testing.expectEqual(.R0, words[51].code);
+    try testing.expectEqualSlices(u8, "R0", words[51].name[0..words[51].flag]);
     try testing.expectEqualSlices(u8, "DOCOL", words[52].name[0..words[52].flag]);
-    try testing.expectEqual(.@">CFA", words[83].code);
     try testing.expectEqualSlices(u8, ">DFA", words[84].name[0..words[84].flag]);
     try testing.expectEqual(0, @intFromEnum(words[84].code));
     // This is a kludge.  >DFA is composite so its code field is followed by 3 data field.
@@ -1148,7 +1042,7 @@ test "defwords" {
     node = mem.readInt(u32, initial[node..][0..4], native);
     try testing.expectEqual(0, mem.readInt(u32, initial[node..][0..4], native)); // CFA of "QUIT" is DOCOL ✓
     node = mem.readInt(u32, initial[node + 4 ..][0..4], native); // follow link to CFA of "R0"
-    try testing.expectEqual(@intFromEnum(Word.R0), mem.readInt(u32, initial[node..][0..4], native)); // CFA of "R0" is R0 ✓
+    try testing.expectEqual(52, mem.readInt(u32, initial[node..][0..4], native)); // CFA of "R0" is R0 ✓
 }
 
 fn cold_start(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) callconv(conv) void {
