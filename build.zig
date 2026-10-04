@@ -24,10 +24,10 @@ pub fn build(b: *std.Build) !void {
             .root_source_file = b.path("src/zorth.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     lib.rdynamic = true;
-    lib.linkLibC();
 
     var emcc_flags = zemscripten.emccDefaultFlags(b.allocator, .{
         .optimize = optimize,
@@ -43,7 +43,7 @@ pub fn build(b: *std.Build) !void {
     try emcc_settings.put("PROXY_TO_PTHREAD", "1");
     try emcc_settings.put("EXPORTED_FUNCTIONS", "_malloc,_main");
 
-    const emcc_step = zemscripten.emccStep(b, lib, .{
+    const emcc_step = zemscripten.emccStep(b, &.{}, &.{lib}, .{
         .optimize = optimize,
         .flags = emcc_flags,
         .settings = emcc_settings,
@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) !void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/zorth.zig"),
             .target = b.resolveTargetQuery(.{}),
+            .link_libc = true,
         }),
     });
     const run_native_tests = b.addRunArtifact(native_tests);
@@ -89,9 +90,11 @@ pub fn build(b: *std.Build) !void {
                     .tail_call,
                 }),
             }),
+            .link_libc = true,
         }),
     });
-    wasm_tests.setExecCmd(&.{ "wasmtime", null });
     const run_wasm_tests = b.addRunArtifact(wasm_tests);
+    // Run with `-fwasmtime` to have the wasm32-wasi binary executed under
+    // wasmtime; `Compile.setExecCmd` was removed in Zig 0.17.0.
     test_step.dependOn(&run_wasm_tests.step);
 }
