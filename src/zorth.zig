@@ -689,7 +689,7 @@ fn _interpret(self: *Interp, sp: usize, rsp: usize, ip: usize, target: usize) ca
             self.append(.{ .word = .LIT });
             self.append(.{ .literal = a });
         } else {
-            s = sp - 4;
+            s -= 4;
             self.writeInt(s, a);
         }
     } else |_| {
@@ -893,7 +893,7 @@ const primitives = [_]*const Code{
     value(@offsetOf(Header, "base")),
     _argc,
     value(47),
-    value(0x4_000),
+    value(@offsetOf(Header, "input_buffer")),
     value(0),
     value(@intFromEnum(Flag.IMMED)),
     value(@intFromEnum(Flag.HIDDEN)),
@@ -954,7 +954,7 @@ fn defwords() [numBytes]u8 {
         \\AND OR XOR INVERT EXIT LIT ! @ +! -! C! C@ C@C! CMOVE STATE HERE LATEST S0 BASE (ARGC) VERSION R0 DOCOL
         \\F_IMMED F_HIDDEN F_LENMASK SYS_EXIT SYS_OPEN SYS_CLOSE SYS_READ SYS_WRITE SYS_CREAT SYS_BRK
         \\O_RDONLY O_WRONLY O_RDWR O_CREAT O_EXCL O_TRUNC O_APPEND O_NONBLOCK >R R> RSP@ RSP! RDROP DSP@ DSP!
-        \\KEY EMIT WORD NUMBER FIND >CFA >DFA CREATE , [ ] IMMEDIATE HIDDEN : ; HIDE ' BRANCH 0BRANCH LITSTRING TELL
+        \\KEY EMIT WORD NUMBER FIND >CFA >DFA CREATE , [ ] IMMEDIATE HIDDEN HIDE : ; ' BRANCH 0BRANCH LITSTRING TELL
         \\INTERPRET QUIT CHAR EXECUTE SYSCALL3 SYSCALL2 SYSCALL1 SYSCALL0
     ;
     const immediate = "[ IMMEDIATE ;";
