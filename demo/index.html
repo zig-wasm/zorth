@@ -20,22 +20,10 @@
     </style>
 
     <script type="module">
-        import "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js";
-        import { openpty } from "https://cdn.jsdelivr.net/npm/xterm-pty@0.11.1/index.mjs";
-        import initEmscripten from "./zorth.mjs";
+        import { startRepl } from "./wasi-repl.mjs";
 
-        const xterm = new Terminal();
-        xterm.open(document.getElementById("terminal"));
-
-        const { master, slave } = openpty();
-        xterm.loadAddon(master);
-
-        const response = await fetch("./jonesforth.f");
-        const preamble = new Uint8Array(await response.arrayBuffer());
-        slave.ldisc.toUpperBuf.push(...preamble);
-
-        await initEmscripten({ pty: slave });
-        slave.ldisc.flushToUpper();
+        const { term } = startRepl("./zorth.wasm");
+        window.__xterm = term; // exposed for browser/zorth.browser.mjs's puppeteer test
     </script>
 </head>
 
