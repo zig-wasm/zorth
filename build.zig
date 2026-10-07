@@ -34,7 +34,6 @@ pub fn build(b: *std.Build) !void {
         "demo/index.html",
         "demo/wasi-repl.mjs",
         "demo/wasi-worker.js",
-        "demo/worker.js",
         "node_modules/coi-serviceworker/coi-serviceworker.min.js",
         "jonesforth/jonesforth.f",
     }) |sub_path| {

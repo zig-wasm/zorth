@@ -1,13 +1,12 @@
-// Worker-side half of running zorth.wasm's classic (blocking `read()`) WASI
-// command in the browser. A program written assuming it owns stdin/stdout
+// Web Worker that fetches zorth.wasm and runs it as a classic (blocking
+// `read()`) WASI command. A program written assuming it owns stdin/stdout
 // gets them wired to a `uwasi.SharedInputChannel`, so `fd_read` genuinely
-// blocks (via `Atomics.wait`) until the host thread supplies more input,
-// instead of returning EOF whenever nothing happens to be buffered yet.
+// blocks (via `Atomics.wait`) until the main thread (wasi-repl.mjs) supplies
+// more input, instead of returning EOF whenever nothing happens to be
+// buffered yet.
 //
 // Must run on a thread that allows blocking `Atomics.wait` -- a Worker,
-// never a browser main thread (see worker.js, which calls runWasiCommand()
-// below; the host side, SharedInputChannel.push, is wired up by
-// wasi-repl.mjs on the main thread instead).
+// never a browser main thread.
 import { WASI, useArgs, useClock, useEnviron, useProc, useRandom, useStdio, SharedInputChannel } from 'https://esm.sh/uwasi@1.6.0';
 
 // uwasi's useStdio doesn't implement fd_pread/fd_pwrite. Zig's std.fs.File
@@ -93,7 +92,7 @@ function blockingRead(channel) {
  * @param {(fd: 1 | 2, chunk: string) => void} onOutput stdout (1) / stderr (2), already UTF-8 decoded
  * @returns {Promise<number>} the WASI exit code
  */
-export async function runWasiCommand(wasm, sharedBuffer, onOutput) {
+async function runWasiCommand(wasm, sharedBuffer, onOutput) {
     const channel = new SharedInputChannel(sharedBuffer);
     const wasi = new WASI({
         features: [
@@ -121,3 +120,16 @@ export async function runWasiCommand(wasm, sharedBuffer, onOutput) {
     const instance = result instanceof WebAssembly.Instance ? result : result.instance;
     return wasi.start(instance);
 }
+
+self.addEventListener('message', async ({ data: { sharedBuffer } }) => {
+    try {
+        const bytes = await fetch('./zorth.wasm').then((response) => response.arrayBuffer());
+        self.postMessage({ type: 'ready' });
+        const code = await runWasiCommand(bytes, sharedBuffer, (fd, chunk) => {
+            self.postMessage({ type: 'output', fd, data: chunk });
+        });
+        self.postMessage({ type: 'exit', code });
+    } catch (error) {
+        self.postMessage({ type: 'error', message: error.message, stack: error.stack });
+    }
+});

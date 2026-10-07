@@ -22,8 +22,7 @@
     <script type="module">
         import { startRepl } from "./wasi-repl.mjs";
 
-        const { term } = startRepl("./zorth.wasm");
-        window.__xterm = term; // exposed for browser/zorth.browser.mjs's puppeteer test
+        window.__xterm = startRepl(); // exposed for browser/zorth.browser.mjs's puppeteer test
     </script>
 </head>
 
