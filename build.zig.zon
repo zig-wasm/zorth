@@ -3,21 +3,6 @@
     .version = "0.0.0",
     .fingerprint = 0x494a01801c240aeb, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
-    .dependencies = .{
-        .emsdk = .{
-            .url = "https://github.com/emscripten-core/emsdk/archive/refs/tags/4.0.15.tar.gz",
-            .hash = "N-V-__8AAFOvDwCo7taCCai1-7vIWbazjhzpIv6NqgJtSZ63",
-        },
-        // FIXME: pinned to a fork branch that ports zemscripten's build.zig to
-        // Zig 0.17's reworked build system (LazyPath.getPath removed, emccStep
-        // gained a src_paths argument). Switch back to the upstream package
-        // once https://github.com/zig-gamedev/zemscripten/pull/23 merges, and
-        // drop the corresponding emccStep call-site change in build.zig.
-        .zemscripten = .{
-            .url = "git+https://github.com/Yinameah/zemscripten?ref=0.17#06d49243789d638ba10d4af004c46df4da83579c",
-            .hash = "zemscripten-0.2.0-dev-sRlDqKFRAAAXl8aICu541O6PiY70v4HIr3FTmCg--WqM",
-        },
-    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

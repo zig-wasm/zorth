@@ -60,7 +60,7 @@ inline fn codeFieldAddress(w: Address) usize {
 
 inline fn openFlags(flags: usize) std.c.O {
     return switch (builtin.os.tag) {
-        .linux, .macos, .emscripten => .{
+        .linux, .macos => .{
             // O_RDWR (2) alone only covers bit 1; RDONLY/WRONLY/RDWR need
             // both access-mode bits (0 and 1), i.e. O_WRONLY | O_RDWR (3).
             .ACCMODE = @enumFromInt(flags & (O_WRONLY | O_RDWR)),
@@ -797,13 +797,11 @@ inline fn _syscall0(sp: [*]i32) [*]i32 {
     return sp;
 }
 
-test "openFlags translates POSIX O_* bits on the .linux/.macos/.emscripten branch" {
-    // This branch covered only .emscripten before; .linux was `unreachable`
-    // (a latent bug, since native Linux is the CI test target) and .macos
-    // is new. _syscall3's actual open()/read()/write() cases can't be
-    // exercised with real pointers here: cells are i32, but a 64-bit host
-    // hands out 64-bit heap/stack addresses that don't fit, so this checks
-    // the pure flag-translation logic instead.
+test "openFlags translates POSIX O_* bits on the .linux/.macos branch" {
+    // _syscall3's actual open()/read()/write() cases can't be exercised
+    // with real pointers here: cells are i32, but a 64-bit host hands out
+    // 64-bit heap/stack addresses that don't fit, so this checks the pure
+    // flag-translation logic instead.
     if (builtin.os.tag == .wasi) return error.SkipZigTest; // .wasi has a differently-shaped std.c.O
 
     const AccMode = @TypeOf(@as(std.c.O, undefined).ACCMODE);

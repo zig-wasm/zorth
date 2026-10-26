@@ -27,7 +27,6 @@ jobs:
       - uses: bytecodealliance/actions/wasmtime/setup@v1
         with:
           version: "38.0.3"
-      - run: zig build activate
       - run: zig build
       - run: zig build test --summary all -fwasmtime
       - run: npm run test:browser

@@ -74,28 +74,6 @@ function terminalText(page) {
     });
 }
 
-function installTerminalHook(page) {
-    return page.evaluateOnNewDocument(() => {
-        Object.defineProperty(window, "Terminal", {
-            configurable: true,
-            set(value) {
-                const Wrapped = function (...args) {
-                    const term = new value(...args);
-                    window.__xterm = term;
-                    return term;
-                };
-                Object.setPrototypeOf(Wrapped, value);
-                Wrapped.prototype = value.prototype;
-                Object.defineProperty(window, "Terminal", {
-                    value: Wrapped,
-                    writable: true,
-                    configurable: true,
-                });
-            },
-        });
-    });
-}
-
 function waitForTerminalText(page, needle) {
     return page.waitForFunction(
         (text) => {
@@ -143,7 +121,6 @@ after(async () => {
 
 test("SEE QUIT decompiles QUIT in the browser demo", { timeout: 120_000 }, async () => {
     const page = await browser.newPage();
-    await installTerminalHook(page);
     page.on("console", (message) => {
         if (message.type() === "warning" || message.type() === "error") {
             console.error(`[browser:${message.type()}] ${message.text()}`);
